@@ -659,6 +659,8 @@ def main():
                         help="回归对比的旧版本，如: --old A_v1 B_v1")
     parser.add_argument("--new", nargs=2, metavar=("A_VER", "B_VER"),
                         help="回归对比的新版本，如: --new A_v2 B_v1")
+    parser.add_argument("--persona-c", default="C_v1",
+                        help="C模型人设版本，如: C_v1(普通) C_v2(投诉) C_v3(法律) C_v4(诱导) C_v5(情绪)")
     parser.add_argument("--limit", type=int, default=0,
                         help="限制测试场景数量，0=全部")
 
@@ -697,7 +699,7 @@ def main():
         old_a_ver, old_b_ver = args.old
         new_a_ver, new_b_ver = args.new
 
-        print(f"\n[2/3] 回归对比模式: {old_a_ver}/{old_b_ver} vs {new_a_ver}/{new_b_ver}")
+        print(f"\n[2/3] 回归对比模式: {old_a_ver}/{old_b_ver} vs {new_a_ver}/{new_b_ver}, C={args.persona_c}")
 
         # 加载人设
         try:
@@ -705,7 +707,7 @@ def main():
             persona_b_old = load_persona(old_b_ver)
             persona_a_new = load_persona(new_a_ver)
             persona_b_new = load_persona(new_b_ver)
-            persona_c = load_persona("C_v1")
+            persona_c = load_persona(args.persona_c)
         except FileNotFoundError as e:
             print(f"  [错误] {e}")
             sys.exit(1)
@@ -757,12 +759,12 @@ def main():
             a_ver = get_latest_version("A")
             b_ver = get_latest_version("B")
 
-        print(f"\n[2/3] 单版本测试: A={a_ver}, B={b_ver}")
+        print(f"\n[2/3] 单版本测试: A={a_ver}, B={b_ver}, C={args.persona_c}")
 
         try:
             persona_a = load_persona(a_ver)
             persona_b = load_persona(b_ver)
-            persona_c = load_persona("C_v1")
+            persona_c = load_persona(args.persona_c)
         except FileNotFoundError as e:
             print(f"  [错误] {e}")
             sys.exit(1)
