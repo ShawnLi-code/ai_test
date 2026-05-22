@@ -23,6 +23,18 @@
         "B": "B_v1"
       },
       "change_summary": "合格率: 27/28 → 28/28"
+    },
+    {
+      "timestamp": "2026-05-22T16:36:36.423341",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v2",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 7/10 → 10/10"
     }
   ]
 }

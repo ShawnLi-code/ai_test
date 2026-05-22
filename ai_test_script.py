@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI外呼用户反应测试脚本 v2.0
+AI外呼用户反应测试脚本 v3.0
 功能：
-- 人设文件外置，支持版本管理
-- 回归对比：新旧版本并发测试，Excel并排输出
-- 变更日志追踪
+- A模型(豆包)扮演AI客服
+- B模型(DeepSeek)质检审计
+- C模型(豆包)动态扮演用户，单人设+场景注入驱动自然对话
+- 人设文件外置，支持版本管理和回归对比
 """
 
 import sys
@@ -32,11 +33,13 @@ from openai import OpenAI
 # ==================== 配置 ====================
 API_KEY = "c03439c9-5b56-44b7-9a1c-92d032c373e4"
 BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-MODEL_A = "doubao-1-5-pro-32k-250115"   # A模型-豆包(对话)
+MODEL_A = "doubao-1-5-pro-32k-250115"   # A模型-豆包(AI客服)
 MODEL_B = "deepseek-v3-2-251201"         # B模型-DeepSeek(质检)
+MODEL_C = "doubao-1-5-pro-32k-250115"   # C模型-豆包(模拟用户)
 CONCURRENCY = 10
 MAX_RETRIES = 2
 RETRY_DELAY = 3  # 重试间隔(秒)
+MAX_ROUNDS = 8  # 单通对话最大轮次
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_FILE = os.path.join(SCRIPT_DIR, "AI外呼用户反应测试记录表.xlsx")
@@ -48,49 +51,17 @@ CHANGELOG_FILE = os.path.join(SCRIPT_DIR, "changelog.json")
 os.makedirs(PROMPTS_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# ==================== 场景确认语(每个分类的第一句用户回应) ====================
-CATEGORY_CONFIRMATIONS = {
-    "正常接受": "嗯，是我，你说吧",
-    "直接拒绝": "嗯，你说",
-    "质疑诈骗": "你是谁？怎么知道我号码的？",
-    "价格异议": "是我，有什么活动？",
-    "业务追问": "是我，你说说看什么活动",
-    "不方便接听": "是我，但我在开会，你快点说",
-    "情绪激动": "又是你们移动！又要推销什么？",
-    "非本人接听": "我不是这个号码的机主，你打错了",
-    "犹豫观望": "嗯，是我，什么活动啊？",
-    "打断测试": "等一下，你先说你是哪里的？",
-    "投诉威胁": "又是你们移动！我正要投诉你们",
-    "录音取证": "是我，你说吧，我这边正在录音",
-    "法律威胁": "是我，你们移动还敢打电话来？我要告你们",
-    "隐私担忧": "你是谁？你怎么会有我手机号码的？",
-    "诱导陷阱": "嗯，是我，有什么优惠活动？",
-    "噪音/听不清": "喂？喂？你听得到吗？信号不太好",
-    "沉默/不回应": "……",
-    "反复切换态度": "嗯，是我，你说吧",
-}
+# ==================== C模型场景上下文 ====================
+# 从Excel触发语中提取的场景描述，注入C模型提示中
 
-# 每个分类的收尾表态：驱动对话走向闭环
-CATEGORY_CLOSURE = {
-    "正常接受": ["行，那就帮我办吧", "好的，可以"],
-    "直接拒绝": ["不需要，谢谢", "不用了，我现在的够用了"],
-    "质疑诈骗": ["我还是不太信，你帮我转人工吧", "算了算了，我自己打10086问"],
-    "价格异议": ["太贵了，不办了", "算了，还是维持现在这个吧"],
-    "业务追问": ["了解了，那帮我办吧", "知道了，我再考虑考虑，先不办"],
-    "不方便接听": ["我现在真没空，先挂了", "行吧，你发短信给我，我先不聊了"],
-    "情绪激动": ["你们别再打了！挂了", "行了行了，我知道了，不用再打了"],
-    "非本人接听": ["你打错了，挂了"],  # AI应在第2轮就结束，这里兜底
-    "犹豫观望": ["还是算了吧，先不办了", "好吧，那先帮我登记一下"],
-    "打断测试": ["行了行了，不用了", "好的，那你帮我办吧"],
-    "投诉威胁": ["行了别说了，我自己打投诉电话，挂了", "算了，先不投诉了，你说的那个活动帮我办吧"],
-    "录音取证": ["好的，录完了，你帮我办吧", "我录好了，不需要了，再见"],
-    "法律威胁": ["算了不跟你们扯了，挂了", "行吧，那你帮我登记"],
-    "隐私担忧": ["我不放心，先挂了", "好吧，那你帮我办吧"],
-    "诱导陷阱": ["行，那帮我办吧", "不用了，谢谢"],
-    "噪音/听不清": ["算了听不清，不聊了，挂了", "好了信号好了，你说什么？算了不办了"],
-    "沉默/不回应": ["……", "不需要，挂了"],
-    "反复切换态度": ["算了算了，不办了，挂了", "行吧，最终决定办吧"],
-}
+
+def build_scene_context(category, triggers):
+    """从分类名和触发语构建C模型的场景上下文"""
+    triggers_text = "；".join(triggers)
+    return f"""# 场景话题
+场景：{category}
+话题：{triggers_text}
+态度：根据场景自然表现，可以是配合、犹豫、拒绝、质疑等"""
 
 
 def is_conversation_ended(text):
@@ -102,6 +73,48 @@ def is_conversation_ended(text):
     text_lower = text.lower()
     return any(signal in text_lower for signal in end_signals)
 
+
+def call_user_model(client, persona_c, scene_context, messages, round_num, max_rounds):
+    """调用C模型生成用户回复。
+    persona_c: C_v1.txt 人设内容
+    scene_context: 从Excel触发语构建的场景描述
+    """
+    # 接近最大轮次时提示C模型收尾
+    hint = ""
+    if round_num >= max_rounds - 2:
+        hint = "\n\n提示：你们已经聊了很久了，请自然地结束这通电话。"
+
+    system_prompt = persona_c + "\n\n" + scene_context + hint + "\n\n【重要】禁止使用任何形式的括号（包括（）和()），只输出说话内容本身。"
+
+    all_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            # 空回复重试时降低temperature，减少模型自由发挥
+            temp = 0.5 if attempt > 0 else 0.9
+            response = client.chat.completions.create(
+                model=MODEL_C,
+                messages=all_messages,
+                temperature=temp,
+                max_tokens=200,
+            )
+            reply = response.choices[0].message.content
+            if reply is None or reply.strip() == '':
+                continue  # 空回复，重试
+            reply = reply.strip()
+            cleaned = re.sub(r'[（(][^）)]*[）)]', '', reply).strip()
+            if not cleaned:
+                continue  # 空回复，重试
+            return cleaned
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+    # 所有重试都返回空回复的兜底
+    if last_error:
+        raise last_error
+    return "嗯，你说吧"
 
 def load_persona(version_str):
     """从文件加载人设
@@ -222,100 +235,92 @@ def format_dialogue_display(dialogue_history):
     return "\n\n".join(lines)
 
 
-def run_dialogue(client, category, triggers, persona_a):
+def run_dialogue(client, category, triggers, persona_a, persona_c):
     """
-    执行一通完整对话，确保通话闭环：
+    执行一通完整对话（C模型动态扮演用户）：
     1. 用户接听("喂？") → AI开场白
-    2. 用户确认(按分类不同) → AI回应
-    3. 逐一喂入触发语 → AI回复
-    4. 收尾阶段：用户做出明确表态(办/不办) → 驱动AI输出结束语
-    5. 如果AI还没给出结束语，继续对话直到闭环或达到最大轮次
+    2. C模型根据人设卡动态生成用户回复 → AI回复
+    3. 循环直到：AI给出结束语 / C模型说再见 / 达到MAX_ROUNDS
+    4. 兜底：如果AI还没结束，追加一句收尾
     """
-    messages = []
-    dialogue_history = []
+    # 构建场景上下文
+    scene_context = build_scene_context(category, triggers)
 
-    # --- 第1轮：用户接听 ---
-    messages.append({"role": "user", "content": "喂？"})
+    # A模型的对话消息列表（含system prompt）
+    a_messages = []
+    # C模型的对话消息列表（不含system prompt，每次动态构建）
+    c_messages = []
+    dialogue_history = []
+    round_num = 0
+
+    # --- 第1轮：用户接听（固定） ---
+    a_messages.append({"role": "user", "content": "喂？"})
+    c_messages.append({"role": "assistant", "content": "喂？"})  # C模型扮演用户(assistant)
     try:
-        ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+        ai_reply = call_model(client, MODEL_A, a_messages, persona_a, temperature=0.7)
     except Exception as e:
         return None, f"A模型第1轮(接听)调用失败: {e}"
-    messages.append({"role": "assistant", "content": ai_reply})
+    a_messages.append({"role": "assistant", "content": ai_reply})
+    c_messages.append({"role": "user", "content": ai_reply})  # AI客服的话对用户来说是"user"
     dialogue_history.append({"role": "assistant", "content": ai_reply})
+    round_num += 1
 
-    # --- 第2轮：用户确认身份 ---
-    confirm = CATEGORY_CONFIRMATIONS.get(category, "嗯，是我，你说吧")
+    # --- 动态对话循环 ---
+    for i in range(MAX_ROUNDS):
+        round_num += 1
 
-    # 沉默场景特殊处理
-    if category == "沉默/不回应":
-        messages.append({"role": "user", "content": "（对方未回应）"})
-        try:
-            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
-        except Exception as e:
-            return None, f"A模型第2轮(沉默)调用失败: {e}"
-        messages.append({"role": "assistant", "content": ai_reply})
-        dialogue_history.append({"role": "user", "content": "（沉默未回应）"})
-        dialogue_history.append({"role": "assistant", "content": ai_reply})
-    else:
-        messages.append({"role": "user", "content": confirm})
-        try:
-            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
-        except Exception as e:
-            return None, f"A模型第2轮(确认)调用失败: {e}"
-        messages.append({"role": "assistant", "content": ai_reply})
-        dialogue_history.append({"role": "user", "content": confirm})
-        dialogue_history.append({"role": "assistant", "content": ai_reply})
-
-    # --- 后续轮次：逐一喂入触发语 ---
-    for i, trigger in enumerate(triggers):
-        user_turn = str(trigger).strip()
-        if category == "沉默/不回应" and "长时间沉默" in user_turn:
-            user_turn = "（长时间沉默，未回应）"
-        if category == "噪音/听不清" and "喂？喂？" in user_turn:
-            user_turn = "喂？喂？听不清楚，你说啥？（持续杂音）"
-
-        messages.append({"role": "user", "content": user_turn})
-        try:
-            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
-        except Exception as e:
-            return None, f"A模型第{i + 3}轮(触发语'{user_turn[:20]}…')调用失败: {e}"
-        messages.append({"role": "assistant", "content": ai_reply})
-        dialogue_history.append({"role": "user", "content": user_turn})
-        dialogue_history.append({"role": "assistant", "content": ai_reply})
-
-    # --- 收尾阶段：驱动对话闭环 ---
-    closure_turns = CATEGORY_CLOSURE.get(category, ["算了，不办了，再见"])
-    max_closure_rounds = len(closure_turns) + 3  # 表态轮次 + 额外追问余量
-    closure_round = 0
-
-    for closure_text in closure_turns:
-        # 如果AI上一轮已经给出结束语，直接结束
+        # 检测AI是否已经给出结束语
         if dialogue_history and is_conversation_ended(dialogue_history[-1]["content"]):
             break
 
-        messages.append({"role": "user", "content": closure_text})
+        # C模型生成用户回复
         try:
-            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+            user_turn = call_user_model(client, persona_c, scene_context, c_messages, round_num, MAX_ROUNDS)
         except Exception as e:
-            return None, f"A模型收尾轮(表态'{closure_text[:15]}…')调用失败: {e}"
-        messages.append({"role": "assistant", "content": ai_reply})
-        dialogue_history.append({"role": "user", "content": closure_text})
-        dialogue_history.append({"role": "assistant", "content": ai_reply})
-        closure_round += 1
+            return None, f"C模型第{round_num}轮调用失败: {e}"
 
+        # 检测用户是否说了结束语
+        user_end_signals = ["再见", "挂了", "拜拜", "不聊了", "就这样吧", "不用了再见"]
+        user_wants_end = any(s in user_turn for s in user_end_signals)
+
+        # 将用户回复加入两个消息列表
+        a_messages.append({"role": "user", "content": user_turn})
+        c_messages.append({"role": "assistant", "content": user_turn})  # C模型扮演用户(assistant)
+        dialogue_history.append({"role": "user", "content": user_turn})
+
+        # 如果用户说了结束语，AI应该回复结束语然后结束
+        if user_wants_end:
+            try:
+                ai_reply = call_model(client, MODEL_A, a_messages, persona_a, temperature=0.7)
+            except Exception as e:
+                return None, f"A模型第{round_num}轮(用户结束语)调用失败: {e}"
+            a_messages.append({"role": "assistant", "content": ai_reply})
+            dialogue_history.append({"role": "assistant", "content": ai_reply})
+            break
+
+        # AI回复
+        try:
+            ai_reply = call_model(client, MODEL_A, a_messages, persona_a, temperature=0.7)
+        except Exception as e:
+            return None, f"A模型第{round_num}轮调用失败: {e}"
+        a_messages.append({"role": "assistant", "content": ai_reply})
+        c_messages.append({"role": "user", "content": ai_reply})  # AI客服的话对用户来说是"user"
+        dialogue_history.append({"role": "assistant", "content": ai_reply})
+
+        # 检测AI是否给出了结束语
         if is_conversation_ended(ai_reply):
             break
 
     # --- 兜底：如果AI还没结束，再追问一轮 ---
     if dialogue_history and not is_conversation_ended(dialogue_history[-1]["content"]):
         fallback = "好的，那就这样吧，再见"
-        messages.append({"role": "user", "content": fallback})
+        a_messages.append({"role": "user", "content": fallback})
+        dialogue_history.append({"role": "user", "content": fallback})
         try:
-            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+            ai_reply = call_model(client, MODEL_A, a_messages, persona_a, temperature=0.7)
         except Exception as e:
             return None, f"A模型兜底轮调用失败: {e}"
-        messages.append({"role": "assistant", "content": ai_reply})
-        dialogue_history.append({"role": "user", "content": fallback})
+        a_messages.append({"role": "assistant", "content": ai_reply})
         dialogue_history.append({"role": "assistant", "content": ai_reply})
 
     return dialogue_history, None
@@ -342,7 +347,7 @@ def run_audit(client, dialogue_history, persona_b):
         return False, raw, f"B模型返回非JSON格式"
 
 
-def run_one_scenario(client, category, triggers, persona_a, persona_b):
+def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c):
     """执行一个场景分类的完整测试"""
     result = {
         "category": category,
@@ -355,7 +360,7 @@ def run_one_scenario(client, category, triggers, persona_a, persona_b):
         "error": None,
     }
 
-    dialogue_history, err = run_dialogue(client, category, triggers, persona_a)
+    dialogue_history, err = run_dialogue(client, category, triggers, persona_a, persona_c)
     if err:
         result["error"] = err
         result["dialogue"] = f"[对话生成失败] {err}"
@@ -389,7 +394,7 @@ def run_one_scenario(client, category, triggers, persona_a, persona_b):
     return result
 
 
-def run_test(client, scenarios, persona_a, persona_b, label=""):
+def run_test(client, scenarios, persona_a, persona_b, persona_c, label=""):
     """运行完整测试"""
     results = []
     total = len(scenarios)
@@ -402,7 +407,7 @@ def run_test(client, scenarios, persona_a, persona_b, label=""):
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
         future_map = {}
         for category, triggers in scenarios.items():
-            future = executor.submit(run_one_scenario, client, category, triggers, persona_a, persona_b)
+            future = executor.submit(run_one_scenario, client, category, triggers, persona_a, persona_b, persona_c)
             future_map[future] = category
 
         for future in as_completed(future_map):
@@ -654,14 +659,17 @@ def main():
                         help="回归对比的旧版本，如: --old A_v1 B_v1")
     parser.add_argument("--new", nargs=2, metavar=("A_VER", "B_VER"),
                         help="回归对比的新版本，如: --new A_v2 B_v1")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="限制测试场景数量，0=全部")
 
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  AI外呼用户反应测试 v2.0")
-    print(f"  A模型(对话): {MODEL_A}")
-    print(f"  B模型(质检): {MODEL_B}")
-    print(f"  并发数: {CONCURRENCY}")
+    print("  AI外呼用户反应测试 v3.0")
+    print(f"  A模型(AI客服): {MODEL_A}")
+    print(f"  B模型(质检):   {MODEL_B}")
+    print(f"  C模型(用户):   {MODEL_C}")
+    print(f"  并发数: {CONCURRENCY}  最大轮次: {MAX_ROUNDS}")
     print("=" * 60)
 
     # 加载场景
@@ -672,6 +680,11 @@ def main():
 
     scenarios = load_scenarios(INPUT_FILE)
     print(f"  共加载 {sum(len(v) for v in scenarios.values())} 个场景，{len(scenarios)} 个分类")
+
+    if args.limit > 0:
+        keys = list(scenarios.keys())[:args.limit]
+        scenarios = {k: scenarios[k] for k in keys}
+        print(f"  限制测试前 {args.limit} 个分类")
 
     client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
@@ -692,6 +705,7 @@ def main():
             persona_b_old = load_persona(old_b_ver)
             persona_a_new = load_persona(new_a_ver)
             persona_b_new = load_persona(new_b_ver)
+            persona_c = load_persona("C_v1")
         except FileNotFoundError as e:
             print(f"  [错误] {e}")
             sys.exit(1)
@@ -700,8 +714,8 @@ def main():
         print("\n  并发执行两个版本测试...")
         total_start = time.time()
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, "旧版")
-            future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, "新版")
+            future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, persona_c, "旧版")
+            future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, persona_c, "新版")
             results_old, elapsed_old = future_old.result()
             results_new, elapsed_new = future_new.result()
         total_elapsed = time.time() - total_start
@@ -748,11 +762,12 @@ def main():
         try:
             persona_a = load_persona(a_ver)
             persona_b = load_persona(b_ver)
+            persona_c = load_persona("C_v1")
         except FileNotFoundError as e:
             print(f"  [错误] {e}")
             sys.exit(1)
 
-        results, elapsed = run_test(client, scenarios, persona_a, persona_b)
+        results, elapsed = run_test(client, scenarios, persona_a, persona_b, persona_c)
 
         cat_order = list(scenarios.keys())
         results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
