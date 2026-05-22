@@ -1,0 +1,779 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+AI外呼用户反应测试脚本 v2.0
+功能：
+- 人设文件外置，支持版本管理
+- 回归对比：新旧版本并发测试，Excel并排输出
+- 变更日志追踪
+"""
+
+import sys
+import io
+# 解决Windows控制台GBK编码问题
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+import os
+import sys
+import json
+import time
+import argparse
+import re
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import openpyxl
+from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+from openai import OpenAI
+
+# ==================== 配置 ====================
+API_KEY = "c03439c9-5b56-44b7-9a1c-92d032c373e4"
+BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+MODEL_A = "doubao-1-5-pro-32k-250115"   # A模型-豆包(对话)
+MODEL_B = "deepseek-v3-2-251201"         # B模型-DeepSeek(质检)
+CONCURRENCY = 10
+MAX_RETRIES = 2
+RETRY_DELAY = 3  # 重试间隔(秒)
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_FILE = os.path.join(SCRIPT_DIR, "AI外呼用户反应测试记录表.xlsx")
+PROMPTS_DIR = os.path.join(SCRIPT_DIR, "prompts")
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
+CHANGELOG_FILE = os.path.join(SCRIPT_DIR, "changelog.json")
+
+# 确保目录存在
+os.makedirs(PROMPTS_DIR, exist_ok=True)
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+# ==================== 场景确认语(每个分类的第一句用户回应) ====================
+CATEGORY_CONFIRMATIONS = {
+    "正常接受": "嗯，是我，你说吧",
+    "直接拒绝": "嗯，你说",
+    "质疑诈骗": "你是谁？怎么知道我号码的？",
+    "价格异议": "是我，有什么活动？",
+    "业务追问": "是我，你说说看什么活动",
+    "不方便接听": "是我，但我在开会，你快点说",
+    "情绪激动": "又是你们移动！又要推销什么？",
+    "非本人接听": "我不是这个号码的机主，你打错了",
+    "犹豫观望": "嗯，是我，什么活动啊？",
+    "打断测试": "等一下，你先说你是哪里的？",
+    "投诉威胁": "又是你们移动！我正要投诉你们",
+    "录音取证": "是我，你说吧，我这边正在录音",
+    "法律威胁": "是我，你们移动还敢打电话来？我要告你们",
+    "隐私担忧": "你是谁？你怎么会有我手机号码的？",
+    "诱导陷阱": "嗯，是我，有什么优惠活动？",
+    "噪音/听不清": "喂？喂？你听得到吗？信号不太好",
+    "沉默/不回应": "……",
+    "反复切换态度": "嗯，是我，你说吧",
+}
+
+# 每个分类的收尾表态：驱动对话走向闭环
+CATEGORY_CLOSURE = {
+    "正常接受": ["行，那就帮我办吧", "好的，可以"],
+    "直接拒绝": ["不需要，谢谢", "不用了，我现在的够用了"],
+    "质疑诈骗": ["我还是不太信，你帮我转人工吧", "算了算了，我自己打10086问"],
+    "价格异议": ["太贵了，不办了", "算了，还是维持现在这个吧"],
+    "业务追问": ["了解了，那帮我办吧", "知道了，我再考虑考虑，先不办"],
+    "不方便接听": ["我现在真没空，先挂了", "行吧，你发短信给我，我先不聊了"],
+    "情绪激动": ["你们别再打了！挂了", "行了行了，我知道了，不用再打了"],
+    "非本人接听": ["你打错了，挂了"],  # AI应在第2轮就结束，这里兜底
+    "犹豫观望": ["还是算了吧，先不办了", "好吧，那先帮我登记一下"],
+    "打断测试": ["行了行了，不用了", "好的，那你帮我办吧"],
+    "投诉威胁": ["行了别说了，我自己打投诉电话，挂了", "算了，先不投诉了，你说的那个活动帮我办吧"],
+    "录音取证": ["好的，录完了，你帮我办吧", "我录好了，不需要了，再见"],
+    "法律威胁": ["算了不跟你们扯了，挂了", "行吧，那你帮我登记"],
+    "隐私担忧": ["我不放心，先挂了", "好吧，那你帮我办吧"],
+    "诱导陷阱": ["行，那帮我办吧", "不用了，谢谢"],
+    "噪音/听不清": ["算了听不清，不聊了，挂了", "好了信号好了，你说什么？算了不办了"],
+    "沉默/不回应": ["……", "不需要，挂了"],
+    "反复切换态度": ["算了算了，不办了，挂了", "行吧，最终决定办吧"],
+}
+
+
+def is_conversation_ended(text):
+    """检测AI的回复是否包含结束语，表示通话已自然结束"""
+    end_signals = [
+        "再见", "祝您生活愉快", "祝你生活愉快", "先不打扰你了",
+        "先不打扰您了", "稍后会有客户经理联系", "先不打扰了",
+    ]
+    text_lower = text.lower()
+    return any(signal in text_lower for signal in end_signals)
+
+
+def load_persona(version_str):
+    """从文件加载人设
+    version_str: 'A_v1', 'B_v2' 等
+    """
+    filename = f"{version_str}.txt"
+    filepath = os.path.join(PROMPTS_DIR, filename)
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"人设文件不存在: {filepath}")
+    with open(filepath, 'r', encoding='utf-8') as f:
+        return f.read().strip()
+
+
+def get_latest_version(model_type):
+    """获取指定模型的最新版本号
+    model_type: 'A' 或 'B'
+    返回: 'A_v1', 'B_v2' 等
+    """
+    pattern = re.compile(rf'^{model_type}_v(\d+)\.txt$')
+    versions = []
+    for f in os.listdir(PROMPTS_DIR):
+        match = pattern.match(f)
+        if match:
+            versions.append(int(match.group(1)))
+    if not versions:
+        raise FileNotFoundError(f"未找到 {model_type}_*.txt 人设文件")
+    return f"{model_type}_v{max(versions)}"
+
+
+# ==================== 工具函数 ====================
+def format_duration(seconds):
+    """格式化时间显示：秒/分秒"""
+    if seconds < 60:
+        return f"{seconds:.1f}秒"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes}分{secs:.0f}秒"
+
+
+def load_scenarios(filepath):
+    """读取Excel表格，按'用户反应分类'分组"""
+    wb = openpyxl.load_workbook(filepath, data_only=True)
+    ws = wb.active
+
+    scenarios = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] is None:
+            continue
+        seq, category, trigger = row[0], row[1], row[2]
+        if not category or not trigger:
+            continue
+        category = str(category).strip()
+        trigger = str(trigger).strip()
+        if category not in scenarios:
+            scenarios[category] = []
+        scenarios[category].append(trigger)
+
+    wb.close()
+    return scenarios
+
+
+def call_model(client, model, messages, system_prompt, max_retries=MAX_RETRIES, temperature=0.7):
+    """调用模型API，失败自动重试"""
+    all_messages = [{"role": "system", "content": system_prompt}] + messages
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            kwargs = dict(
+                model=model,
+                messages=all_messages,
+                temperature=temperature,
+            )
+            # DeepSeek深度思考模式
+            if model == MODEL_B:
+                kwargs["temperature"] = 0.3
+                kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+
+            response = client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+    raise last_error
+
+
+def extract_json(text):
+    """从B模型输出中提取JSON"""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        return match.group(0)
+    return text
+
+
+def format_dialogue_for_audit(dialogue_history):
+    """将对话历史格式化为B模型可审计的文本"""
+    lines = ["【通话记录】"]
+    round_num = 1
+    for entry in dialogue_history:
+        role_label = "AI客服" if entry["role"] == "assistant" else "用户"
+        lines.append(f"[第{round_num}轮]")
+        lines.append(f"{role_label}：{entry['content']}")
+        lines.append("")
+        round_num += 1
+    return "\n".join(lines)
+
+
+def format_dialogue_display(dialogue_history):
+    """将对话历史格式化为Excel展示用的文本"""
+    lines = []
+    for entry in dialogue_history:
+        role_label = "【AI客服】" if entry["role"] == "assistant" else "【用户】"
+        lines.append(f"{role_label} {entry['content']}")
+    return "\n\n".join(lines)
+
+
+def run_dialogue(client, category, triggers, persona_a):
+    """
+    执行一通完整对话，确保通话闭环：
+    1. 用户接听("喂？") → AI开场白
+    2. 用户确认(按分类不同) → AI回应
+    3. 逐一喂入触发语 → AI回复
+    4. 收尾阶段：用户做出明确表态(办/不办) → 驱动AI输出结束语
+    5. 如果AI还没给出结束语，继续对话直到闭环或达到最大轮次
+    """
+    messages = []
+    dialogue_history = []
+
+    # --- 第1轮：用户接听 ---
+    messages.append({"role": "user", "content": "喂？"})
+    try:
+        ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+    except Exception as e:
+        return None, f"A模型第1轮(接听)调用失败: {e}"
+    messages.append({"role": "assistant", "content": ai_reply})
+    dialogue_history.append({"role": "assistant", "content": ai_reply})
+
+    # --- 第2轮：用户确认身份 ---
+    confirm = CATEGORY_CONFIRMATIONS.get(category, "嗯，是我，你说吧")
+
+    # 沉默场景特殊处理
+    if category == "沉默/不回应":
+        messages.append({"role": "user", "content": "（对方未回应）"})
+        try:
+            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+        except Exception as e:
+            return None, f"A模型第2轮(沉默)调用失败: {e}"
+        messages.append({"role": "assistant", "content": ai_reply})
+        dialogue_history.append({"role": "user", "content": "（沉默未回应）"})
+        dialogue_history.append({"role": "assistant", "content": ai_reply})
+    else:
+        messages.append({"role": "user", "content": confirm})
+        try:
+            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+        except Exception as e:
+            return None, f"A模型第2轮(确认)调用失败: {e}"
+        messages.append({"role": "assistant", "content": ai_reply})
+        dialogue_history.append({"role": "user", "content": confirm})
+        dialogue_history.append({"role": "assistant", "content": ai_reply})
+
+    # --- 后续轮次：逐一喂入触发语 ---
+    for i, trigger in enumerate(triggers):
+        user_turn = str(trigger).strip()
+        if category == "沉默/不回应" and "长时间沉默" in user_turn:
+            user_turn = "（长时间沉默，未回应）"
+        if category == "噪音/听不清" and "喂？喂？" in user_turn:
+            user_turn = "喂？喂？听不清楚，你说啥？（持续杂音）"
+
+        messages.append({"role": "user", "content": user_turn})
+        try:
+            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+        except Exception as e:
+            return None, f"A模型第{i + 3}轮(触发语'{user_turn[:20]}…')调用失败: {e}"
+        messages.append({"role": "assistant", "content": ai_reply})
+        dialogue_history.append({"role": "user", "content": user_turn})
+        dialogue_history.append({"role": "assistant", "content": ai_reply})
+
+    # --- 收尾阶段：驱动对话闭环 ---
+    closure_turns = CATEGORY_CLOSURE.get(category, ["算了，不办了，再见"])
+    max_closure_rounds = len(closure_turns) + 3  # 表态轮次 + 额外追问余量
+    closure_round = 0
+
+    for closure_text in closure_turns:
+        # 如果AI上一轮已经给出结束语，直接结束
+        if dialogue_history and is_conversation_ended(dialogue_history[-1]["content"]):
+            break
+
+        messages.append({"role": "user", "content": closure_text})
+        try:
+            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+        except Exception as e:
+            return None, f"A模型收尾轮(表态'{closure_text[:15]}…')调用失败: {e}"
+        messages.append({"role": "assistant", "content": ai_reply})
+        dialogue_history.append({"role": "user", "content": closure_text})
+        dialogue_history.append({"role": "assistant", "content": ai_reply})
+        closure_round += 1
+
+        if is_conversation_ended(ai_reply):
+            break
+
+    # --- 兜底：如果AI还没结束，再追问一轮 ---
+    if dialogue_history and not is_conversation_ended(dialogue_history[-1]["content"]):
+        fallback = "好的，那就这样吧，再见"
+        messages.append({"role": "user", "content": fallback})
+        try:
+            ai_reply = call_model(client, MODEL_A, messages, persona_a, temperature=0.7)
+        except Exception as e:
+            return None, f"A模型兜底轮调用失败: {e}"
+        messages.append({"role": "assistant", "content": ai_reply})
+        dialogue_history.append({"role": "user", "content": fallback})
+        dialogue_history.append({"role": "assistant", "content": ai_reply})
+
+    return dialogue_history, None
+
+
+def run_audit(client, dialogue_history, persona_b):
+    """将对话记录发给B模型质检"""
+    dialogue_text = format_dialogue_for_audit(dialogue_history)
+    audit_messages = [
+        {"role": "user", "content": f"请审计以下通话记录，严格按JSON格式输出结果。\n\n{dialogue_text}"},
+    ]
+    try:
+        raw = call_model(client, MODEL_B, audit_messages, persona_b, temperature=0.3)
+    except Exception as e:
+        return False, "{}", f"B模型调用失败: {e}"
+
+    try:
+        json_str = extract_json(raw)
+        result = json.loads(json_str)
+        results_list = result.get("results", [])
+        passed = len(results_list) == 0
+        return passed, json.dumps(result, ensure_ascii=False, indent=2), None
+    except json.JSONDecodeError:
+        return False, raw, f"B模型返回非JSON格式"
+
+
+def run_one_scenario(client, category, triggers, persona_a, persona_b):
+    """执行一个场景分类的完整测试"""
+    result = {
+        "category": category,
+        "triggers": "；".join(triggers),
+        "dialogue": "",
+        "passed": False,
+        "audit_json": "",
+        "violation_count": 0,
+        "violation_summary": "",
+        "error": None,
+    }
+
+    dialogue_history, err = run_dialogue(client, category, triggers, persona_a)
+    if err:
+        result["error"] = err
+        result["dialogue"] = f"[对话生成失败] {err}"
+        return result
+
+    result["dialogue"] = format_dialogue_display(dialogue_history)
+
+    passed, audit_json, err = run_audit(client, dialogue_history, persona_b)
+    result["passed"] = passed
+    result["audit_json"] = audit_json
+
+    if err:
+        result["error"] = err
+        return result
+
+    try:
+        audit_data = json.loads(audit_json)
+        violations = audit_data.get("results", [])
+        result["violation_count"] = len(violations)
+        if violations:
+            summaries = []
+            for v in violations:
+                std = v.get("quality_standard", "未知")
+                reason = v.get("reason", "")
+                summaries.append(f"[{std}] {reason}")
+            result["violation_summary"] = " | ".join(summaries)
+    except json.JSONDecodeError:
+        result["violation_count"] = -1
+        result["violation_summary"] = "质检结果JSON解析失败"
+
+    return result
+
+
+def run_test(client, scenarios, persona_a, persona_b, label=""):
+    """运行完整测试"""
+    results = []
+    total = len(scenarios)
+    completed = 0
+    start_time = time.time()
+
+    if label:
+        print(f"\n  [{label}] 开始测试...")
+
+    with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
+        future_map = {}
+        for category, triggers in scenarios.items():
+            future = executor.submit(run_one_scenario, client, category, triggers, persona_a, persona_b)
+            future_map[future] = category
+
+        for future in as_completed(future_map):
+            category = future_map[future]
+            completed += 1
+            try:
+                result = future.result()
+                results.append(result)
+                status = "✓ 合格" if result["passed"] else ("✗ 不合格" if not result["error"] else "⚠ 异常")
+                if label:
+                    print(f"    [{label}][{completed}/{total}] {category}: {status} (违规{result['violation_count']}项)")
+                else:
+                    print(f"  [{completed}/{total}] {category}: {status} (违规{result['violation_count']}项)")
+                if result["error"]:
+                    print(f"         错误: {result['error'][:100]}")
+            except Exception as e:
+                if label:
+                    print(f"    [{label}][{completed}/{total}] {category}: ⚠ 线程异常: {e}")
+                else:
+                    print(f"  [{completed}/{total}] {category}: ⚠ 线程异常: {e}")
+                results.append({
+                    "category": category,
+                    "triggers": "；".join(scenarios.get(category, [])),
+                    "dialogue": "",
+                    "passed": False,
+                    "audit_json": "",
+                    "violation_count": 0,
+                    "violation_summary": "",
+                    "error": f"线程异常: {e}",
+                })
+
+    elapsed = time.time() - start_time
+    return results, elapsed
+
+
+def update_changelog(old_a, new_a, old_b, new_b, results_old, results_new):
+    """更新变更日志"""
+    if os.path.exists(CHANGELOG_FILE):
+        with open(CHANGELOG_FILE, 'r', encoding='utf-8') as f:
+            changelog = json.load(f)
+    else:
+        changelog = {"versions": []}
+
+    # 计算变化
+    old_passed = sum(1 for r in results_old if r["passed"] and not r["error"])
+    new_passed = sum(1 for r in results_new if r["passed"] and not r["error"])
+    change_summary = f"合格率: {old_passed}/{len(results_old)} → {new_passed}/{len(results_new)}"
+
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "old_persona": {"A": old_a, "B": old_b},
+        "new_persona": {"A": new_a, "B": new_b},
+        "change_summary": change_summary,
+    }
+    changelog["versions"].append(entry)
+
+    with open(CHANGELOG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(changelog, f, ensure_ascii=False, indent=2)
+    print(f"\n变更日志已更新: {CHANGELOG_FILE}")
+
+
+def write_single_excel(results, output_file, persona_a_ver, persona_b_ver):
+    """单版本测试：写入Excel"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = f"测试结果_{persona_a_ver}"
+
+    headers = [
+        "序号", "场景分类", "触发语列表", "对话全文", "质检结果",
+        "是否合格", "违规项数", "违规摘要", "质检原始JSON", "错误信息"
+    ]
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=10)
+    cell_font = Font(name="微软雅黑", size=9)
+    wrap_align = Alignment(wrap_text=True, vertical="top")
+    center_align = Alignment(horizontal="center", vertical="top")
+    pass_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center_align
+        cell.border = thin_border
+
+    for i, r in enumerate(results):
+        row = i + 2
+        values = [
+            i + 1,
+            r.get("category", ""),
+            r.get("triggers", ""),
+            r.get("dialogue", ""),
+            "合格" if r.get("passed") else ("不合格" if not r.get("error") else "异常"),
+            "是" if r.get("passed") else ("否" if not r.get("error") else "异常"),
+            r.get("violation_count", 0),
+            r.get("violation_summary", ""),
+            r.get("audit_json", ""),
+            r.get("error", ""),
+        ]
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.font = cell_font
+            cell.alignment = wrap_align
+            cell.border = thin_border
+
+        result_cell = ws.cell(row=row, column=5)
+        if r.get("passed"):
+            result_cell.fill = pass_fill
+        elif not r.get("error"):
+            result_cell.fill = fail_fill
+
+    col_widths = [6, 14, 30, 60, 10, 10, 10, 40, 40, 30]
+    for col, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    wb.save(output_file)
+    print(f"\n结果已保存到: {output_file}")
+
+
+def write_regression_excel(results_old, results_new, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver):
+    """回归对比：并排输出Excel"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "回归对比"
+
+    headers = [
+        "序号", "场景分类", "触发语列表",
+        f"旧版{old_a_ver}对话", f"旧版{old_a_ver}质检结果", f"旧版{old_a_ver}违规摘要",
+        f"新版{new_a_ver}对话", f"新版{new_a_ver}质检结果", f"新版{new_a_ver}违规摘要",
+        "变化", "详情"
+    ]
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=10)
+    cell_font = Font(name="微软雅黑", size=9)
+    wrap_align = Alignment(wrap_text=True, vertical="top")
+    center_align = Alignment(horizontal="center", vertical="top")
+    pass_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    improve_fill = PatternFill(start_color="B4C7E7", end_color="B4C7E7", fill_type="solid")
+    regress_fill = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center_align
+        cell.border = thin_border
+
+    # 按场景分类对齐
+    old_map = {r["category"]: r for r in results_old}
+    new_map = {r["category"]: r for r in results_new}
+    all_categories = list(dict.fromkeys([r["category"] for r in results_old + results_new]))
+
+    for i, cat in enumerate(all_categories):
+        row = i + 2
+        old_r = old_map.get(cat, {})
+        new_r = new_map.get(cat, {})
+
+        old_passed = old_r.get("passed", False)
+        new_passed = new_r.get("passed", False)
+
+        if old_passed and new_passed:
+            change = "-"
+            change_fill = None
+        elif not old_passed and not new_passed:
+            change = "仍不合格"
+            change_fill = fail_fill
+        elif not old_passed and new_passed:
+            change = "✓ 修复"
+            change_fill = improve_fill
+        else:
+            change = "✗ 新增违规"
+            change_fill = regress_fill
+
+        detail = ""
+        if change in ["✓ 修复", "✗ 新增违规"]:
+            old_summary = old_r.get("violation_summary", "")
+            new_summary = new_r.get("violation_summary", "")
+            if old_summary or new_summary:
+                detail = f"旧版: {old_summary}\n新版: {new_summary}"
+
+        values = [
+            i + 1,
+            cat,
+            old_r.get("triggers", new_r.get("triggers", "")),
+            old_r.get("dialogue", ""),
+            "合格" if old_passed else ("不合格" if not old_r.get("error") else "异常"),
+            old_r.get("violation_summary", ""),
+            new_r.get("dialogue", ""),
+            "合格" if new_passed else ("不合格" if not new_r.get("error") else "异常"),
+            new_r.get("violation_summary", ""),
+            change,
+            detail,
+        ]
+
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.font = cell_font
+            cell.alignment = wrap_align
+            cell.border = thin_border
+
+        # 质检结果列着色
+        old_result_cell = ws.cell(row=row, column=5)
+        new_result_cell = ws.cell(row=row, column=8)
+        if old_passed:
+            old_result_cell.fill = pass_fill
+        elif not old_r.get("error"):
+            old_result_cell.fill = fail_fill
+        if new_passed:
+            new_result_cell.fill = pass_fill
+        elif not new_r.get("error"):
+            new_result_cell.fill = fail_fill
+
+        # 变化列着色
+        change_cell = ws.cell(row=row, column=10)
+        if change_fill:
+            change_cell.fill = change_fill
+
+    col_widths = [6, 14, 30, 50, 10, 40, 50, 10, 40, 12, 60]
+    for col, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    wb.save(output_file)
+    print(f"\n回归对比结果已保存到: {output_file}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="AI外呼用户反应测试脚本")
+    parser.add_argument("--persona", nargs=2, metavar=("A_VER", "B_VER"),
+                        help="指定人设版本，如: --persona A_v2 B_v1")
+    parser.add_argument("--regression", action="store_true",
+                        help="启用回归对比模式")
+    parser.add_argument("--old", nargs=2, metavar=("A_VER", "B_VER"),
+                        help="回归对比的旧版本，如: --old A_v1 B_v1")
+    parser.add_argument("--new", nargs=2, metavar=("A_VER", "B_VER"),
+                        help="回归对比的新版本，如: --new A_v2 B_v1")
+
+    args = parser.parse_args()
+
+    print("=" * 60)
+    print("  AI外呼用户反应测试 v2.0")
+    print(f"  A模型(对话): {MODEL_A}")
+    print(f"  B模型(质检): {MODEL_B}")
+    print(f"  并发数: {CONCURRENCY}")
+    print("=" * 60)
+
+    # 加载场景
+    print("\n[1/3] 加载场景表格...")
+    if not os.path.exists(INPUT_FILE):
+        print(f"  [错误] 找不到输入文件: {INPUT_FILE}")
+        sys.exit(1)
+
+    scenarios = load_scenarios(INPUT_FILE)
+    print(f"  共加载 {sum(len(v) for v in scenarios.values())} 个场景，{len(scenarios)} 个分类")
+
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+
+    if args.regression:
+        # 回归对比模式
+        if not args.old or not args.new:
+            print("  [错误] 回归模式需要 --old 和 --new 参数")
+            sys.exit(1)
+
+        old_a_ver, old_b_ver = args.old
+        new_a_ver, new_b_ver = args.new
+
+        print(f"\n[2/3] 回归对比模式: {old_a_ver}/{old_b_ver} vs {new_a_ver}/{new_b_ver}")
+
+        # 加载人设
+        try:
+            persona_a_old = load_persona(old_a_ver)
+            persona_b_old = load_persona(old_b_ver)
+            persona_a_new = load_persona(new_a_ver)
+            persona_b_new = load_persona(new_b_ver)
+        except FileNotFoundError as e:
+            print(f"  [错误] {e}")
+            sys.exit(1)
+
+        # 并发跑两个版本
+        print("\n  并发执行两个版本测试...")
+        total_start = time.time()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, "旧版")
+            future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, "新版")
+            results_old, elapsed_old = future_old.result()
+            results_new, elapsed_new = future_new.result()
+        total_elapsed = time.time() - total_start
+
+        # 按场景排序
+        cat_order = list(scenarios.keys())
+        results_old.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
+        results_new.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
+
+        # 写Excel
+        print(f"\n[3/3] 写入回归对比Excel...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = os.path.join(RESULTS_DIR, f"回归对比_{old_a_ver}_vs_{new_a_ver}_{timestamp}.xlsx")
+        write_regression_excel(results_old, results_new, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver)
+
+        # 更新变更日志
+        update_changelog(old_a_ver, new_a_ver, old_b_ver, new_b_ver, results_old, results_new)
+
+        # 汇总
+        old_passed = sum(1 for r in results_old if r["passed"] and not r["error"])
+        new_passed = sum(1 for r in results_new if r["passed"] and not r["error"])
+        fixed = sum(1 for r_old, r_new in zip(results_old, results_new) if not r_old["passed"] and r_new["passed"])
+        regressed = sum(1 for r_old, r_new in zip(results_old, results_new) if r_old["passed"] and not r_new["passed"])
+
+        print("\n" + "=" * 60)
+        print(f"  回归对比完成")
+        print(f"  旧版 ({old_a_ver}/{old_b_ver}): {old_passed}/{len(results_old)} 合格  耗时: {format_duration(elapsed_old)}")
+        print(f"  新版 ({new_a_ver}/{new_b_ver}): {new_passed}/{len(results_new)} 合格  耗时: {format_duration(elapsed_new)}")
+        print(f"  修复: {fixed} 项")
+        print(f"  新增违规: {regressed} 项")
+        print(f"  总耗时: {format_duration(total_elapsed)}")
+        print("=" * 60)
+
+    else:
+        # 单版本测试模式
+        if args.persona:
+            a_ver, b_ver = args.persona
+        else:
+            a_ver = get_latest_version("A")
+            b_ver = get_latest_version("B")
+
+        print(f"\n[2/3] 单版本测试: A={a_ver}, B={b_ver}")
+
+        try:
+            persona_a = load_persona(a_ver)
+            persona_b = load_persona(b_ver)
+        except FileNotFoundError as e:
+            print(f"  [错误] {e}")
+            sys.exit(1)
+
+        results, elapsed = run_test(client, scenarios, persona_a, persona_b)
+
+        cat_order = list(scenarios.keys())
+        results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
+
+        print(f"\n[3/3] 写入Excel...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = os.path.join(RESULTS_DIR, f"AI外呼测试结果_{a_ver}_{timestamp}.xlsx")
+        write_single_excel(results, output_file, a_ver, b_ver)
+
+        total_scenarios = len(results)
+        passed_count = sum(1 for r in results if r["passed"] and not r["error"])
+        failed_count = sum(1 for r in results if not r["passed"] and not r["error"])
+        error_count = sum(1 for r in results if r["error"])
+
+        print("\n" + "=" * 60)
+        print(f"  测试完成: 共{total_scenarios}个分类")
+        print(f"  合格: {passed_count}  不合格: {failed_count}  异常: {error_count}")
+        print(f"  总耗时: {format_duration(elapsed)}")
+        print(f"  平均每个场景: {format_duration(elapsed / total_scenarios)}")
+        print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
