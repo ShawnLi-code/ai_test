@@ -17,29 +17,28 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import os
-import sys
 import json
 import time
 import argparse
 import re
+import random
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
-from openai import OpenAI
 
 # ==================== 配置 ====================
-API_KEY = "c03439c9-5b56-44b7-9a1c-92d032c373e4"
-BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-MODEL_A = "doubao-1-5-pro-32k-250115"   # A模型-豆包(AI客服)
-MODEL_B = "deepseek-v3-2-251201"         # B模型-DeepSeek(质检)
-MODEL_C = "doubao-1-5-pro-32k-250115"   # C模型-豆包(模拟用户)
-CONCURRENCY = 10
-MAX_RETRIES = 2
-RETRY_DELAY = 3  # 重试间隔(秒)
-MAX_ROUNDS = 8  # 单通对话最大轮次
+API_KEY = os.getenv("ARK_API_KEY", "")
+BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+MODEL_A = os.getenv("MODEL_A", "doubao-1-5-pro-32k-250115")   # A模型-豆包(AI客服)
+MODEL_B = os.getenv("MODEL_B", "deepseek-v3-2-251201")         # B模型-DeepSeek(质检)
+MODEL_C = os.getenv("MODEL_C", "doubao-1-5-pro-32k-250115")   # C模型-豆包(模拟用户)
+CONCURRENCY = int(os.getenv("TEST_CONCURRENCY", "10"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "3"))  # 重试间隔(秒)
+MAX_ROUNDS = int(os.getenv("MAX_ROUNDS", "8"))  # 单通对话最大轮次
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_FILE = os.path.join(SCRIPT_DIR, "AI外呼用户反应测试记录表.xlsx")
@@ -154,16 +153,27 @@ def format_duration(seconds):
     return f"{minutes}分{secs:.0f}秒"
 
 
+def get_column_index(headers, expected_name):
+    """按表头名查找列索引，返回0-based索引。"""
+    for idx, header in enumerate(headers):
+        if header and str(header).strip() == expected_name:
+            return idx
+    raise ValueError(f"Excel缺少必要列: {expected_name}")
+
+
 def load_scenarios(filepath):
     """读取Excel表格，按'用户反应分类'分组"""
     wb = openpyxl.load_workbook(filepath, data_only=True)
     ws = wb.active
 
+    headers = [cell.value for cell in ws[1]]
+    category_idx = get_column_index(headers, "用户反应分类")
+    trigger_idx = get_column_index(headers, "用户可能说的话")
+
     scenarios = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if row[0] is None:
-            continue
-        seq, category, trigger = row[0], row[1], row[2]
+        category = row[category_idx] if category_idx < len(row) else None
+        trigger = row[trigger_idx] if trigger_idx < len(row) else None
         if not category or not trigger:
             continue
         category = str(category).strip()
@@ -176,8 +186,23 @@ def load_scenarios(filepath):
     return scenarios
 
 
-def call_model(client, model, messages, system_prompt, max_retries=MAX_RETRIES, temperature=0.7):
+def select_scenarios(scenarios, limit=0, sample_size=0, sample_seed=42):
+    """按参数选择要执行的场景，保持默认行为不变。"""
+    if sample_size > 0:
+        items = list(scenarios.items())
+        rng = random.Random(sample_seed)
+        rng.shuffle(items)
+        return dict(items[:sample_size])
+    if limit > 0:
+        keys = list(scenarios.keys())[:limit]
+        return {k: scenarios[k] for k in keys}
+    return scenarios
+
+
+def call_model(client, model, messages, system_prompt, max_retries=None, temperature=0.7):
     """调用模型API，失败自动重试"""
+    if max_retries is None:
+        max_retries = MAX_RETRIES
     all_messages = [{"role": "system", "content": system_prompt}] + messages
     last_error = None
     for attempt in range(max_retries + 1):
@@ -347,7 +372,7 @@ def run_audit(client, dialogue_history, persona_b):
         return False, raw, f"B模型返回非JSON格式"
 
 
-def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c):
+def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c, skip_audit=False):
     """执行一个场景分类的完整测试"""
     result = {
         "category": category,
@@ -367,6 +392,12 @@ def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c
         return result
 
     result["dialogue"] = format_dialogue_display(dialogue_history)
+
+    if skip_audit:
+        result["passed"] = None
+        result["audit_json"] = '{"results": [], "skipped": true}'
+        result["violation_summary"] = "已跳过B模型质检"
+        return result
 
     passed, audit_json, err = run_audit(client, dialogue_history, persona_b)
     result["passed"] = passed
@@ -394,7 +425,7 @@ def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c
     return result
 
 
-def run_test(client, scenarios, persona_a, persona_b, persona_c, label=""):
+def run_test(client, scenarios, persona_a, persona_b, persona_c, label="", skip_audit=False):
     """运行完整测试"""
     results = []
     total = len(scenarios)
@@ -407,7 +438,7 @@ def run_test(client, scenarios, persona_a, persona_b, persona_c, label=""):
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
         future_map = {}
         for category, triggers in scenarios.items():
-            future = executor.submit(run_one_scenario, client, category, triggers, persona_a, persona_b, persona_c)
+            future = executor.submit(run_one_scenario, client, category, triggers, persona_a, persona_b, persona_c, skip_audit)
             future_map[future] = category
 
         for future in as_completed(future_map):
@@ -416,7 +447,7 @@ def run_test(client, scenarios, persona_a, persona_b, persona_c, label=""):
             try:
                 result = future.result()
                 results.append(result)
-                status = "✓ 合格" if result["passed"] else ("✗ 不合格" if not result["error"] else "⚠ 异常")
+                status = "跳过质检" if result["passed"] is None else ("✓ 合格" if result["passed"] else ("✗ 不合格" if not result["error"] else "⚠ 异常"))
                 if label:
                     print(f"    [{label}][{completed}/{total}] {category}: {status} (违规{result['violation_count']}项)")
                 else:
@@ -500,13 +531,19 @@ def write_single_excel(results, output_file, persona_a_ver, persona_b_ver):
 
     for i, r in enumerate(results):
         row = i + 2
+        if r.get("passed") is None:
+            result_text = "跳过质检"
+            passed_text = "跳过质检"
+        else:
+            result_text = "合格" if r.get("passed") else ("不合格" if not r.get("error") else "异常")
+            passed_text = "是" if r.get("passed") else ("否" if not r.get("error") else "异常")
         values = [
             i + 1,
             r.get("category", ""),
             r.get("triggers", ""),
             r.get("dialogue", ""),
-            "合格" if r.get("passed") else ("不合格" if not r.get("error") else "异常"),
-            "是" if r.get("passed") else ("否" if not r.get("error") else "异常"),
+            result_text,
+            passed_text,
             r.get("violation_count", 0),
             r.get("violation_summary", ""),
             r.get("audit_json", ""),
@@ -519,9 +556,9 @@ def write_single_excel(results, output_file, persona_a_ver, persona_b_ver):
             cell.border = thin_border
 
         result_cell = ws.cell(row=row, column=5)
-        if r.get("passed"):
+        if r.get("passed") is True:
             result_cell.fill = pass_fill
-        elif not r.get("error"):
+        elif r.get("passed") is False and not r.get("error"):
             result_cell.fill = fail_fill
 
     col_widths = [6, 14, 30, 60, 10, 10, 10, 40, 40, 30]
@@ -581,7 +618,10 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
         old_passed = old_r.get("passed", False)
         new_passed = new_r.get("passed", False)
 
-        if old_passed and new_passed:
+        if old_passed is None or new_passed is None:
+            change = "跳过质检"
+            change_fill = None
+        elif old_passed and new_passed:
             change = "-"
             change_fill = None
         elif not old_passed and not new_passed:
@@ -606,10 +646,10 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
             cat,
             old_r.get("triggers", new_r.get("triggers", "")),
             old_r.get("dialogue", ""),
-            "合格" if old_passed else ("不合格" if not old_r.get("error") else "异常"),
+            "跳过质检" if old_passed is None else ("合格" if old_passed else ("不合格" if not old_r.get("error") else "异常")),
             old_r.get("violation_summary", ""),
             new_r.get("dialogue", ""),
-            "合格" if new_passed else ("不合格" if not new_r.get("error") else "异常"),
+            "跳过质检" if new_passed is None else ("合格" if new_passed else ("不合格" if not new_r.get("error") else "异常")),
             new_r.get("violation_summary", ""),
             change,
             detail,
@@ -624,13 +664,13 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
         # 质检结果列着色
         old_result_cell = ws.cell(row=row, column=5)
         new_result_cell = ws.cell(row=row, column=8)
-        if old_passed:
+        if old_passed is True:
             old_result_cell.fill = pass_fill
-        elif not old_r.get("error"):
+        elif old_passed is False and not old_r.get("error"):
             old_result_cell.fill = fail_fill
-        if new_passed:
+        if new_passed is True:
             new_result_cell.fill = pass_fill
-        elif not new_r.get("error"):
+        elif new_passed is False and not new_r.get("error"):
             new_result_cell.fill = fail_fill
 
         # 变化列着色
@@ -650,6 +690,8 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
 
 
 def main():
+    global INPUT_FILE, CONCURRENCY, MAX_ROUNDS, MAX_RETRIES
+
     parser = argparse.ArgumentParser(description="AI外呼用户反应测试脚本")
     parser.add_argument("--persona", nargs=2, metavar=("A_VER", "B_VER"),
                         help="指定人设版本，如: --persona A_v2 B_v1")
@@ -663,8 +705,30 @@ def main():
                         help="C模型人设版本，如: C_v1(普通) C_v2(投诉) C_v3(法律) C_v4(诱导) C_v5(情绪)")
     parser.add_argument("--limit", type=int, default=0,
                         help="限制测试场景数量，0=全部")
+    parser.add_argument("--sample-size", type=int, default=0,
+                        help="随机抽样测试的场景分类数量，0=不抽样")
+    parser.add_argument("--sample-seed", type=int, default=42,
+                        help="随机抽样种子，便于复现")
+    parser.add_argument("--concurrency", type=int, default=CONCURRENCY,
+                        help=f"并发场景数，默认读取TEST_CONCURRENCY或{CONCURRENCY}")
+    parser.add_argument("--max-rounds", type=int, default=MAX_ROUNDS,
+                        help=f"单通对话最大轮次，默认读取MAX_ROUNDS或{MAX_ROUNDS}")
+    parser.add_argument("--max-retries", type=int, default=MAX_RETRIES,
+                        help=f"模型调用失败最大重试次数，默认读取MAX_RETRIES或{MAX_RETRIES}")
+    parser.add_argument("--skip-audit", action="store_true",
+                        help="只生成A/C对话，不调用B模型质检，用于快速冒烟测试")
+    parser.add_argument("--input", default=INPUT_FILE,
+                        help="输入Excel路径")
 
     args = parser.parse_args()
+    INPUT_FILE = os.path.abspath(args.input)
+    CONCURRENCY = args.concurrency
+    MAX_ROUNDS = args.max_rounds
+    MAX_RETRIES = args.max_retries
+
+    if not API_KEY:
+        print("  [错误] 未设置ARK_API_KEY环境变量")
+        sys.exit(1)
 
     print("=" * 60)
     print("  AI外呼用户反应测试 v3.0")
@@ -683,10 +747,17 @@ def main():
     scenarios = load_scenarios(INPUT_FILE)
     print(f"  共加载 {sum(len(v) for v in scenarios.values())} 个场景，{len(scenarios)} 个分类")
 
-    if args.limit > 0:
-        keys = list(scenarios.keys())[:args.limit]
-        scenarios = {k: scenarios[k] for k in keys}
-        print(f"  限制测试前 {args.limit} 个分类")
+    scenarios = select_scenarios(scenarios, args.limit, args.sample_size, args.sample_seed)
+    if args.sample_size > 0:
+        print(f"  随机抽样 {len(scenarios)} 个分类，seed={args.sample_seed}")
+    elif args.limit > 0:
+        print(f"  限制测试前 {len(scenarios)} 个分类")
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        print("  [错误] 未安装openai依赖，请先执行: pip install -r requirements.txt")
+        sys.exit(1)
 
     client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
@@ -716,8 +787,8 @@ def main():
         print("\n  并发执行两个版本测试...")
         total_start = time.time()
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, persona_c, "旧版")
-            future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, persona_c, "新版")
+            future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, persona_c, "旧版", args.skip_audit)
+            future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, persona_c, "新版", args.skip_audit)
             results_old, elapsed_old = future_old.result()
             results_new, elapsed_new = future_new.result()
         total_elapsed = time.time() - total_start
@@ -769,7 +840,7 @@ def main():
             print(f"  [错误] {e}")
             sys.exit(1)
 
-        results, elapsed = run_test(client, scenarios, persona_a, persona_b, persona_c)
+        results, elapsed = run_test(client, scenarios, persona_a, persona_b, persona_c, skip_audit=args.skip_audit)
 
         cat_order = list(scenarios.keys())
         results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
@@ -781,12 +852,13 @@ def main():
 
         total_scenarios = len(results)
         passed_count = sum(1 for r in results if r["passed"] and not r["error"])
-        failed_count = sum(1 for r in results if not r["passed"] and not r["error"])
+        skipped_count = sum(1 for r in results if r["passed"] is None and not r["error"])
+        failed_count = sum(1 for r in results if r["passed"] is False and not r["error"])
         error_count = sum(1 for r in results if r["error"])
 
         print("\n" + "=" * 60)
         print(f"  测试完成: 共{total_scenarios}个分类")
-        print(f"  合格: {passed_count}  不合格: {failed_count}  异常: {error_count}")
+        print(f"  合格: {passed_count}  不合格: {failed_count}  跳过质检: {skipped_count}  异常: {error_count}")
         print(f"  总耗时: {format_duration(elapsed)}")
         print(f"  平均每个场景: {format_duration(elapsed / total_scenarios)}")
         print("=" * 60)
