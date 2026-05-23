@@ -274,22 +274,20 @@ def extract_json(text):
 def format_dialogue_for_audit(dialogue_history):
     """将对话历史格式化为B模型可审计的文本"""
     lines = ["【通话记录】"]
-    round_num = 1
-    for entry in dialogue_history:
+    for round_num, entry in enumerate(dialogue_history, start=1):
         role_label = "AI客服" if entry["role"] == "assistant" else "用户"
         lines.append(f"[第{round_num}轮]")
         lines.append(f"{role_label}：{entry['content']}")
         lines.append("")
-        round_num += 1
     return "\n".join(lines)
 
 
 def format_dialogue_display(dialogue_history):
     """将对话历史格式化为Excel展示用的文本"""
     lines = []
-    for entry in dialogue_history:
+    for round_num, entry in enumerate(dialogue_history, start=1):
         role_label = "【AI客服】" if entry["role"] == "assistant" else "【用户】"
-        lines.append(f"{role_label} {entry['content']}")
+        lines.append(f"第{round_num}轮 {role_label} {entry['content']}")
     return "\n\n".join(lines)
 
 
