@@ -6,6 +6,9 @@ __pycache__/
 # 测试结果（不提交Excel，太大了）
 results/
 
+# 本地私密配置
+config.local.json
+
 # IDE
 .vscode/
 .idea/

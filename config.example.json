@@ -1,0 +1,17 @@
+{
+  "api_key": "",
+  "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "model_a": "doubao-1-5-pro-32k-250115",
+  "model_b": "deepseek-v3-2-251201",
+  "model_c": "doubao-1-5-pro-32k-250115",
+  "concurrency": 10,
+  "persona_concurrency": 2,
+  "max_retries": 2,
+  "retry_delay": 3,
+  "max_rounds": 8,
+  "input_file": "AI外呼用户反应测试记录表.xlsx",
+  "persona_a": "",
+  "persona_b": "",
+  "persona_c": "C_v1",
+  "persona_c_list": []
+}

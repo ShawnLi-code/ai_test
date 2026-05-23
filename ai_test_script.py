@@ -30,21 +30,54 @@ from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 # ==================== 配置 ====================
-API_KEY = os.getenv("ARK_API_KEY", "")
-BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
-MODEL_A = os.getenv("MODEL_A", "doubao-1-5-pro-32k-250115")   # A模型-豆包(AI客服)
-MODEL_B = os.getenv("MODEL_B", "deepseek-v3-2-251201")         # B模型-DeepSeek(质检)
-MODEL_C = os.getenv("MODEL_C", "doubao-1-5-pro-32k-250115")   # C模型-豆包(模拟用户)
-CONCURRENCY = int(os.getenv("TEST_CONCURRENCY", "10"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", "3"))  # 重试间隔(秒)
-MAX_ROUNDS = int(os.getenv("MAX_ROUNDS", "8"))  # 单通对话最大轮次
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT_FILE = os.path.join(SCRIPT_DIR, "AI外呼用户反应测试记录表.xlsx")
 PROMPTS_DIR = os.path.join(SCRIPT_DIR, "prompts")
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
 CHANGELOG_FILE = os.path.join(SCRIPT_DIR, "changelog.json")
+DEFAULT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.local.json")
+
+
+def load_config(config_path):
+    """加载JSON配置文件；文件不存在时返回空配置。"""
+    if not config_path:
+        return {}
+    if not os.path.isabs(config_path):
+        config_path = os.path.join(SCRIPT_DIR, config_path)
+    if not os.path.exists(config_path):
+        return {}
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+CONFIG = load_config(DEFAULT_CONFIG_FILE)
+
+
+def config_value(name, env_name, default=None):
+    """配置优先级：config.local.json > 环境变量 > 默认值。命令行在main里覆盖。"""
+    value = CONFIG.get(name)
+    if value not in (None, ""):
+        return value
+    value = os.getenv(env_name)
+    if value not in (None, ""):
+        return value
+    return default
+
+
+def config_int(name, env_name, default):
+    return int(config_value(name, env_name, default))
+
+
+API_KEY = config_value("api_key", "ARK_API_KEY", "")
+BASE_URL = config_value("base_url", "ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+MODEL_A = config_value("model_a", "MODEL_A", "doubao-1-5-pro-32k-250115")   # A模型-豆包(AI客服)
+MODEL_B = config_value("model_b", "MODEL_B", "deepseek-v3-2-251201")         # B模型-DeepSeek(质检)
+MODEL_C = config_value("model_c", "MODEL_C", "doubao-1-5-pro-32k-250115")   # C模型-豆包(模拟用户)
+CONCURRENCY = config_int("concurrency", "TEST_CONCURRENCY", 10)
+PERSONA_CONCURRENCY = config_int("persona_concurrency", "PERSONA_CONCURRENCY", 2)
+MAX_RETRIES = config_int("max_retries", "MAX_RETRIES", 2)
+RETRY_DELAY = config_int("retry_delay", "RETRY_DELAY", 3)  # 重试间隔(秒)
+MAX_ROUNDS = config_int("max_rounds", "MAX_ROUNDS", 8)  # 单通对话最大轮次
+INPUT_FILE = os.path.join(SCRIPT_DIR, config_value("input_file", "INPUT_FILE", "AI外呼用户反应测试记录表.xlsx"))
 
 # 确保目录存在
 os.makedirs(PROMPTS_DIR, exist_ok=True)
@@ -311,7 +344,7 @@ def run_dialogue(client, category, triggers, persona_a, persona_c):
         # 将用户回复加入两个消息列表
         a_messages.append({"role": "user", "content": user_turn})
         c_messages.append({"role": "assistant", "content": user_turn})  # C模型扮演用户(assistant)
-        dialogue_history.append({"role": "user", "content": user_turn})
+        dialogue_history.append({"role": "user", "content": user_turn, "source": "C"})
 
         # 如果用户说了结束语，AI应该回复结束语然后结束
         if user_wants_end:
@@ -340,7 +373,7 @@ def run_dialogue(client, category, triggers, persona_a, persona_c):
     if dialogue_history and not is_conversation_ended(dialogue_history[-1]["content"]):
         fallback = "好的，那就这样吧，再见"
         a_messages.append({"role": "user", "content": fallback})
-        dialogue_history.append({"role": "user", "content": fallback})
+        dialogue_history.append({"role": "user", "content": fallback, "source": "script"})
         try:
             ai_reply = call_model(client, MODEL_A, a_messages, persona_a, temperature=0.7)
         except Exception as e:
@@ -474,6 +507,26 @@ def run_test(client, scenarios, persona_a, persona_b, persona_c, label="", skip_
     return results, elapsed
 
 
+def run_test_for_personas(client, scenarios, persona_a, persona_b, persona_c_map, skip_audit=False, persona_concurrency=1):
+    """对同一批场景运行多个C人设，用于横向对比。"""
+    all_results = {}
+    elapsed_map = {}
+    max_workers = max(1, min(persona_concurrency, len(persona_c_map)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(run_test, client, scenarios, persona_a, persona_b, persona_c, c_ver, skip_audit): c_ver
+            for c_ver, persona_c in persona_c_map.items()
+        }
+        for future in as_completed(future_map):
+            c_ver = future_map[future]
+            results, elapsed = future.result()
+            all_results[c_ver] = results
+            elapsed_map[c_ver] = elapsed
+    ordered_results = {c_ver: all_results[c_ver] for c_ver in persona_c_map if c_ver in all_results}
+    ordered_elapsed = {c_ver: elapsed_map[c_ver] for c_ver in persona_c_map if c_ver in elapsed_map}
+    return ordered_results, ordered_elapsed
+
+
 def update_changelog(old_a, new_a, old_b, new_b, results_old, results_new):
     """更新变更日志"""
     if os.path.exists(CHANGELOG_FILE):
@@ -505,7 +558,14 @@ def write_single_excel(results, output_file, persona_a_ver, persona_b_ver):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = f"测试结果_{persona_a_ver}"
+    write_result_sheet(ws, results)
 
+    wb.save(output_file)
+    print(f"\n结果已保存到: {output_file}")
+
+
+def write_result_sheet(ws, results):
+    """写入单个结果工作表，并高亮不合格和异常行。"""
     headers = [
         "序号", "场景分类", "触发语列表", "对话全文", "质检结果",
         "是否合格", "违规项数", "违规摘要", "质检原始JSON", "错误信息"
@@ -517,6 +577,7 @@ def write_single_excel(results, output_file, persona_a_ver, persona_b_ver):
     center_align = Alignment(horizontal="center", vertical="top")
     pass_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    error_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
     thin_border = Border(
         left=Side(style="thin"), right=Side(style="thin"),
         top=Side(style="thin"), bottom=Side(style="thin"),
@@ -554,6 +615,10 @@ def write_single_excel(results, output_file, persona_a_ver, persona_b_ver):
             cell.font = cell_font
             cell.alignment = wrap_align
             cell.border = thin_border
+            if r.get("error"):
+                cell.fill = error_fill
+            elif r.get("passed") is False:
+                cell.fill = fail_fill
 
         result_cell = ws.cell(row=row, column=5)
         if r.get("passed") is True:
@@ -568,8 +633,23 @@ def write_single_excel(results, output_file, persona_a_ver, persona_b_ver):
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
 
+
+def write_multi_c_excel(results_by_c, output_file, persona_a_ver, persona_b_ver, scenario_order):
+    """多C人设测试：每个C人设独立工作表。"""
+    wb = openpyxl.Workbook()
+    default_ws = wb.active
+    wb.remove(default_ws)
+
+    for c_ver, results in results_by_c.items():
+        ws = wb.create_sheet(f"{c_ver}测试结果"[:31])
+        ordered = sorted(
+            results,
+            key=lambda r: scenario_order.index(r["category"]) if r["category"] in scenario_order else 999,
+        )
+        write_result_sheet(ws, ordered)
+
     wb.save(output_file)
-    print(f"\n结果已保存到: {output_file}")
+    print(f"\n多C人设结果已保存到: {output_file}")
 
 
 def write_regression_excel(results_old, results_new, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver):
@@ -690,9 +770,12 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
 
 
 def main():
-    global INPUT_FILE, CONCURRENCY, MAX_ROUNDS, MAX_RETRIES
+    global API_KEY, BASE_URL, MODEL_A, MODEL_B, MODEL_C
+    global INPUT_FILE, CONCURRENCY, PERSONA_CONCURRENCY, MAX_ROUNDS, MAX_RETRIES, RETRY_DELAY
 
     parser = argparse.ArgumentParser(description="AI外呼用户反应测试脚本")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_FILE,
+                        help="配置文件路径，默认读取config.local.json")
     parser.add_argument("--persona", nargs=2, metavar=("A_VER", "B_VER"),
                         help="指定人设版本，如: --persona A_v2 B_v1")
     parser.add_argument("--regression", action="store_true",
@@ -701,33 +784,62 @@ def main():
                         help="回归对比的旧版本，如: --old A_v1 B_v1")
     parser.add_argument("--new", nargs=2, metavar=("A_VER", "B_VER"),
                         help="回归对比的新版本，如: --new A_v2 B_v1")
-    parser.add_argument("--persona-c", default="C_v1",
+    parser.add_argument("--persona-c", default=None,
                         help="C模型人设版本，如: C_v1(普通) C_v2(投诉) C_v3(法律) C_v4(诱导) C_v5(情绪)")
+    parser.add_argument("--persona-c-list", nargs="+",
+                        help="一次运行多个C模型人设，并为每个C人设生成独立工作表，如: --persona-c-list C_v1 C_v2 C_v3 C_v4 C_v5")
     parser.add_argument("--limit", type=int, default=0,
                         help="限制测试场景数量，0=全部")
     parser.add_argument("--sample-size", type=int, default=0,
                         help="随机抽样测试的场景分类数量，0=不抽样")
     parser.add_argument("--sample-seed", type=int, default=42,
                         help="随机抽样种子，便于复现")
-    parser.add_argument("--concurrency", type=int, default=CONCURRENCY,
+    parser.add_argument("--concurrency", type=int, default=None,
                         help=f"并发场景数，默认读取TEST_CONCURRENCY或{CONCURRENCY}")
-    parser.add_argument("--max-rounds", type=int, default=MAX_ROUNDS,
+    parser.add_argument("--persona-concurrency", type=int, default=None,
+                        help=f"多C人设并发数，默认读取PERSONA_CONCURRENCY或{PERSONA_CONCURRENCY}")
+    parser.add_argument("--max-rounds", type=int, default=None,
                         help=f"单通对话最大轮次，默认读取MAX_ROUNDS或{MAX_ROUNDS}")
-    parser.add_argument("--max-retries", type=int, default=MAX_RETRIES,
+    parser.add_argument("--max-retries", type=int, default=None,
                         help=f"模型调用失败最大重试次数，默认读取MAX_RETRIES或{MAX_RETRIES}")
     parser.add_argument("--skip-audit", action="store_true",
                         help="只生成A/C对话，不调用B模型质检，用于快速冒烟测试")
-    parser.add_argument("--input", default=INPUT_FILE,
+    parser.add_argument("--input", default=None,
                         help="输入Excel路径")
 
     args = parser.parse_args()
-    INPUT_FILE = os.path.abspath(args.input)
-    CONCURRENCY = args.concurrency
-    MAX_ROUNDS = args.max_rounds
-    MAX_RETRIES = args.max_retries
+
+    config = load_config(args.config)
+    if config:
+        API_KEY = config.get("api_key") or API_KEY
+        BASE_URL = config.get("base_url") or BASE_URL
+        MODEL_A = config.get("model_a") or MODEL_A
+        MODEL_B = config.get("model_b") or MODEL_B
+        MODEL_C = config.get("model_c") or MODEL_C
+        CONCURRENCY = int(config.get("concurrency", CONCURRENCY))
+        PERSONA_CONCURRENCY = int(config.get("persona_concurrency", PERSONA_CONCURRENCY))
+        MAX_ROUNDS = int(config.get("max_rounds", MAX_ROUNDS))
+        MAX_RETRIES = int(config.get("max_retries", MAX_RETRIES))
+        RETRY_DELAY = int(config.get("retry_delay", RETRY_DELAY))
+        if config.get("input_file"):
+            INPUT_FILE = config["input_file"]
+
+    if args.input:
+        INPUT_FILE = args.input
+    if not os.path.isabs(INPUT_FILE):
+        INPUT_FILE = os.path.join(SCRIPT_DIR, INPUT_FILE)
+    INPUT_FILE = os.path.abspath(INPUT_FILE)
+    if args.concurrency is not None:
+        CONCURRENCY = args.concurrency
+    if args.persona_concurrency is not None:
+        PERSONA_CONCURRENCY = args.persona_concurrency
+    if args.max_rounds is not None:
+        MAX_ROUNDS = args.max_rounds
+    if args.max_retries is not None:
+        MAX_RETRIES = args.max_retries
 
     if not API_KEY:
-        print("  [错误] 未设置ARK_API_KEY环境变量")
+        print("  [错误] 未设置api_key。请在config.local.json中配置api_key，或设置ARK_API_KEY环境变量")
         sys.exit(1)
 
     print("=" * 60)
@@ -735,8 +847,9 @@ def main():
     print(f"  A模型(AI客服): {MODEL_A}")
     print(f"  B模型(质检):   {MODEL_B}")
     print(f"  C模型(用户):   {MODEL_C}")
-    print(f"  并发数: {CONCURRENCY}  最大轮次: {MAX_ROUNDS}")
+    print(f"  场景并发数: {CONCURRENCY}  C人设并发数: {PERSONA_CONCURRENCY}  最大轮次: {MAX_ROUNDS}")
     print("=" * 60)
+    total_script_start = time.time()
 
     # 加载场景
     print("\n[1/3] 加载场景表格...")
@@ -820,6 +933,7 @@ def main():
         print(f"  修复: {fixed} 项")
         print(f"  新增违规: {regressed} 项")
         print(f"  总耗时: {format_duration(total_elapsed)}")
+        print(f"  本次测试总耗时: {format_duration(time.time() - total_script_start)}")
         print("=" * 60)
 
     else:
@@ -827,22 +941,56 @@ def main():
         if args.persona:
             a_ver, b_ver = args.persona
         else:
-            a_ver = get_latest_version("A")
-            b_ver = get_latest_version("B")
+            a_ver = config.get("persona_a") or get_latest_version("A")
+            b_ver = config.get("persona_b") or get_latest_version("B")
 
-        print(f"\n[2/3] 单版本测试: A={a_ver}, B={b_ver}, C={args.persona_c}")
+        if args.persona_c_list:
+            c_versions = args.persona_c_list
+        elif args.persona_c:
+            c_versions = [args.persona_c]
+        elif config.get("persona_c_list"):
+            c_versions = config["persona_c_list"]
+        else:
+            c_versions = [config.get("persona_c") or "C_v1"]
+        print(f"\n[2/3] 单版本测试: A={a_ver}, B={b_ver}, C={','.join(c_versions)}")
 
         try:
             persona_a = load_persona(a_ver)
             persona_b = load_persona(b_ver)
-            persona_c = load_persona(args.persona_c)
+            persona_c_map = {c_ver: load_persona(c_ver) for c_ver in c_versions}
         except FileNotFoundError as e:
             print(f"  [错误] {e}")
             sys.exit(1)
 
-        results, elapsed = run_test(client, scenarios, persona_a, persona_b, persona_c, skip_audit=args.skip_audit)
-
         cat_order = list(scenarios.keys())
+
+        if len(c_versions) > 1:
+            results_by_c, elapsed_map = run_test_for_personas(
+                client, scenarios, persona_a, persona_b, persona_c_map, args.skip_audit, PERSONA_CONCURRENCY
+            )
+            for results in results_by_c.values():
+                results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
+
+            print(f"\n[3/3] 写入多C人设Excel...")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_file = os.path.join(RESULTS_DIR, f"AI外呼多C测试结果_{a_ver}_{timestamp}.xlsx")
+            write_multi_c_excel(results_by_c, output_file, a_ver, b_ver, cat_order)
+
+            print("\n" + "=" * 60)
+            print(f"  多C人设测试完成: 共{len(scenarios)}个分类，{len(c_versions)}个C人设")
+            for c_ver in c_versions:
+                results = results_by_c[c_ver]
+                passed_count = sum(1 for r in results if r["passed"] and not r["error"])
+                skipped_count = sum(1 for r in results if r["passed"] is None and not r["error"])
+                failed_count = sum(1 for r in results if r["passed"] is False and not r["error"])
+                error_count = sum(1 for r in results if r["error"])
+                print(f"  {c_ver}: 合格 {passed_count}  不合格 {failed_count}  跳过质检 {skipped_count}  异常 {error_count}  耗时 {format_duration(elapsed_map[c_ver])}")
+            print(f"  本次测试总耗时: {format_duration(time.time() - total_script_start)}")
+            print("=" * 60)
+            return
+
+        persona_c = next(iter(persona_c_map.values()))
+        results, elapsed = run_test(client, scenarios, persona_a, persona_b, persona_c, skip_audit=args.skip_audit)
         results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
 
         print(f"\n[3/3] 写入Excel...")
@@ -860,6 +1008,7 @@ def main():
         print(f"  测试完成: 共{total_scenarios}个分类")
         print(f"  合格: {passed_count}  不合格: {failed_count}  跳过质检: {skipped_count}  异常: {error_count}")
         print(f"  总耗时: {format_duration(elapsed)}")
+        print(f"  本次测试总耗时: {format_duration(time.time() - total_script_start)}")
         print(f"  平均每个场景: {format_duration(elapsed / total_scenarios)}")
         print("=" * 60)
 
