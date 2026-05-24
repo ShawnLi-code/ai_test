@@ -84,7 +84,33 @@ MAX_RETRIES = config_int("max_retries", "MAX_RETRIES", 2)
 RETRY_DELAY = config_int("retry_delay", "RETRY_DELAY", 3)  # 重试间隔(秒)
 SCENARIO_RETRIES = config_int("scenario_retries", "SCENARIO_RETRIES", 0)
 MAX_ROUNDS = config_int("max_rounds", "MAX_ROUNDS", 8)  # 单通对话最大轮次
-INPUT_FILE = os.path.join(SCRIPT_DIR, config_value("input_file", "INPUT_FILE", "AI外呼用户反应测试记录表.xlsx"))
+
+DEFAULT_SCENARIOS = [
+    "正常接受",
+    "直接拒绝",
+    "质疑诈骗",
+    "价格异议",
+    "业务追问",
+    "不方便接听",
+    "情绪激动",
+    "非本人接听",
+    "犹豫观望",
+    "打断测试",
+    "投诉威胁",
+    "法律维权",
+    "隐私担忧",
+    "诱导陷阱",
+    "噪音/听不清",
+    "沉默/不回应",
+    "反复切换态度",
+    "老人/理解困难",
+    "要求转人工",
+    "套取信息",
+    "恶意骚扰反制",
+    "比较竞品",
+    "异常输入",
+    "情感诉求",
+]
 API_SEMAPHORE = threading.BoundedSemaphore(max(1, API_CONCURRENCY))
 
 # 确保目录存在
@@ -129,15 +155,12 @@ def copy_to_latest(archive_file, latest_file):
     print(f"最新结果已更新到: {latest_file}")
 
 # ==================== C模型场景上下文 ====================
-# 从Excel触发语中提取的场景描述，注入C模型提示中
 
 
-def build_scene_context(category, triggers):
-    """从分类名和触发语构建C模型的场景上下文"""
-    triggers_text = "；".join(triggers)
+def build_scene_context(category):
+    """根据场景分类名构建C模型的场景上下文"""
     return f"""# 场景话题
 场景：{category}
-话题：{triggers_text}
 态度：根据场景自然表现，可以是配合、犹豫、拒绝、质疑等"""
 
 
@@ -278,42 +301,17 @@ def get_column_index(headers, expected_name):
     raise ValueError(f"Excel缺少必要列: {expected_name}")
 
 
-def load_scenarios(filepath):
-    """读取Excel表格，按'用户反应分类'分组"""
-    wb = openpyxl.load_workbook(filepath, data_only=True)
-    ws = wb.active
-
-    headers = [cell.value for cell in ws[1]]
-    category_idx = get_column_index(headers, "用户反应分类")
-    trigger_idx = get_column_index(headers, "用户可能说的话")
-
-    scenarios = {}
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        category = row[category_idx] if category_idx < len(row) else None
-        trigger = row[trigger_idx] if trigger_idx < len(row) else None
-        if not category or not trigger:
-            continue
-        category = str(category).strip()
-        trigger = str(trigger).strip()
-        if category not in scenarios:
-            scenarios[category] = []
-        scenarios[category].append(trigger)
-
-    wb.close()
-    return scenarios
-
 
 def select_scenarios(scenarios, limit=0, sample_size=0, sample_seed=42):
     """按参数选择要执行的场景，保持默认行为不变。"""
     if sample_size > 0:
-        items = list(scenarios.items())
+        items = list(scenarios)
         rng = random.Random(sample_seed)
         rng.shuffle(items)
-        return dict(items[:sample_size])
+        return items[:sample_size]
     if limit > 0:
-        keys = list(scenarios.keys())[:limit]
-        return {k: scenarios[k] for k in keys}
-    return scenarios
+        return list(scenarios)[:limit]
+    return list(scenarios)
 
 
 def call_model(client, model, messages, system_prompt, max_retries=None, temperature=0.7):
@@ -378,7 +376,7 @@ def format_dialogue_display(dialogue_history):
     return "\n\n".join(lines)
 
 
-def run_dialogue(client, category, triggers, persona_a, persona_c):
+def run_dialogue(client, category, persona_a, persona_c):
     """
     执行一通完整对话（C模型动态扮演用户）：
     1. 用户接听("喂？") → AI开场白
@@ -386,8 +384,7 @@ def run_dialogue(client, category, triggers, persona_a, persona_c):
     3. 循环直到：AI给出结束语 / C模型说再见 / 达到MAX_ROUNDS
     4. 兜底：如果AI还没结束，追加一句收尾
     """
-    # 构建场景上下文
-    scene_context = build_scene_context(category, triggers)
+    scene_context = build_scene_context(category)
 
     # A模型的对话消息列表（含system prompt）
     a_messages = []
@@ -503,12 +500,11 @@ def run_ticket(client, dialogue_history, persona_d):
     return (raw or "").strip(), None
 
 
-def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c,
+def run_one_scenario(client, category, persona_a, persona_b, persona_c,
                      persona_d=None, skip_audit=False, skip_ticket=False):
     """执行一个场景分类的完整测试：A/C 对话 → D 生成工单 → B 质检（含工单）。"""
     result = {
         "category": category,
-        "triggers": "；".join(triggers),
         "dialogue": "",
         "ticket_json": "",
         "passed": False,
@@ -518,7 +514,7 @@ def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c
         "error": None,
     }
 
-    dialogue_history, err = run_dialogue(client, category, triggers, persona_a, persona_c)
+    dialogue_history, err = run_dialogue(client, category, persona_a, persona_c)
     if err:
         result["error"] = err
         result["dialogue"] = f"[对话生成失败] {err}"
@@ -586,11 +582,11 @@ def is_retryable_error(error):
     return any(keyword in text for keyword in retryable_keywords)
 
 
-def run_one_scenario_with_retry(client, category, triggers, persona_a, persona_b, persona_c,
+def run_one_scenario_with_retry(client, category, persona_a, persona_b, persona_c,
                                 persona_d=None, skip_audit=False, skip_ticket=False):
     result = None
     for attempt in range(SCENARIO_RETRIES + 1):
-        result = run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c,
+        result = run_one_scenario(client, category, persona_a, persona_b, persona_c,
                                   persona_d, skip_audit, skip_ticket)
         if not is_retryable_error(result.get("error")):
             return result
@@ -614,8 +610,8 @@ def run_test(client, scenarios, persona_a, persona_b, persona_c, label="",
 
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
         future_map = {}
-        for category, triggers in scenarios.items():
-            future = executor.submit(run_one_scenario_with_retry, client, category, triggers,
+        for category in scenarios:
+            future = executor.submit(run_one_scenario_with_retry, client, category,
                                      persona_a, persona_b, persona_c,
                                      persona_d, skip_audit, skip_ticket)
             future_map[future] = category
@@ -640,7 +636,6 @@ def run_test(client, scenarios, persona_a, persona_b, persona_c, label="",
                     print(f"  [{completed}/{total}] {category}: ⚠ 线程异常: {e}")
                 results.append({
                     "category": category,
-                    "triggers": "；".join(scenarios.get(category, [])),
                     "dialogue": "",
                     "passed": False,
                     "audit_json": "",
@@ -735,7 +730,7 @@ def write_result_sheet(ws, results, c_persona_label="", c_persona_desc=""):
     )
 
     headers = [
-        "序号", "场景分类", "触发语列表", "对话全文", "工单内容", "质检结果",
+        "序号", "场景分类", "对话全文", "工单内容", "质检结果",
         "是否合格", "违规项数", "违规摘要", "质检原始JSON", "错误信息"
     ]
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -836,7 +831,6 @@ def write_result_sheet(ws, results, c_persona_label="", c_persona_desc=""):
         values = [
             i + 1,
             r.get("category", ""),
-            r.get("triggers", ""),
             r.get("dialogue", ""),
             r.get("ticket_json", ""),
             result_text,
@@ -856,13 +850,13 @@ def write_result_sheet(ws, results, c_persona_label="", c_persona_desc=""):
             elif r.get("passed") is False:
                 cell.fill = fail_fill
 
-        result_cell = ws.cell(row=row, column=6)
+        result_cell = ws.cell(row=row, column=5)
         if r.get("passed") is True:
             result_cell.fill = pass_fill
         elif r.get("passed") is False and not r.get("error"):
             result_cell.fill = fail_fill
 
-    col_widths = [6, 14, 30, 60, 40, 10, 10, 10, 40, 40, 30]
+    col_widths = [6, 14, 60, 40, 10, 10, 10, 40, 40, 30]
     for col, width in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -908,7 +902,7 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
     ws.title = "回归对比"
 
     headers = [
-        "序号", "场景分类", "触发语列表",
+        "序号", "场景分类",
         f"旧版{old_a_ver}对话", f"旧版{old_a_ver}质检结果", f"旧版{old_a_ver}违规摘要",
         f"新版{new_a_ver}对话", f"新版{new_a_ver}质检结果", f"新版{new_a_ver}违规摘要",
         "变化", "详情"
@@ -973,7 +967,6 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
         values = [
             i + 1,
             cat,
-            old_r.get("triggers", new_r.get("triggers", "")),
             old_r.get("dialogue", ""),
             "跳过质检" if old_passed is None else ("合格" if old_passed else ("不合格" if not old_r.get("error") else "异常")),
             old_r.get("violation_summary", ""),
@@ -1003,11 +996,11 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
             new_result_cell.fill = fail_fill
 
         # 变化列着色
-        change_cell = ws.cell(row=row, column=10)
+        change_cell = ws.cell(row=row, column=9)
         if change_fill:
             change_cell.fill = change_fill
 
-    col_widths = [6, 14, 30, 50, 10, 40, 50, 10, 40, 12, 60]
+    col_widths = [6, 14, 50, 10, 40, 50, 10, 40, 12, 60]
     for col, width in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -1020,7 +1013,7 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
 
 def main():
     global API_KEY, BASE_URL, MODEL_A, MODEL_B, MODEL_C, MODEL_D
-    global INPUT_FILE, CONCURRENCY, PERSONA_CONCURRENCY, API_CONCURRENCY, MAX_ROUNDS, MAX_RETRIES, RETRY_DELAY, SCENARIO_RETRIES, API_SEMAPHORE
+    global CONCURRENCY, PERSONA_CONCURRENCY, API_CONCURRENCY, MAX_ROUNDS, MAX_RETRIES, RETRY_DELAY, SCENARIO_RETRIES, API_SEMAPHORE
 
     parser = argparse.ArgumentParser(description="AI外呼用户反应测试脚本")
     parser.add_argument("--config", default=DEFAULT_CONFIG_FILE,
@@ -1061,8 +1054,6 @@ def main():
                         help="只生成A/C对话，不调用B模型质检，用于快速冒烟测试")
     parser.add_argument("--skip-ticket", action="store_true",
                         help="跳过D模型工单生成；与--skip-audit互相独立")
-    parser.add_argument("--input", default=None,
-                        help="输入Excel路径")
 
     args = parser.parse_args()
 
@@ -1081,14 +1072,6 @@ def main():
         MAX_RETRIES = int(config.get("max_retries", MAX_RETRIES))
         RETRY_DELAY = int(config.get("retry_delay", RETRY_DELAY))
         SCENARIO_RETRIES = int(config.get("scenario_retries", SCENARIO_RETRIES))
-        if config.get("input_file"):
-            INPUT_FILE = config["input_file"]
-
-    if args.input:
-        INPUT_FILE = args.input
-    if not os.path.isabs(INPUT_FILE):
-        INPUT_FILE = os.path.join(SCRIPT_DIR, INPUT_FILE)
-    INPUT_FILE = os.path.abspath(INPUT_FILE)
     if args.concurrency is not None:
         CONCURRENCY = args.concurrency
     if args.persona_concurrency is not None:
@@ -1127,15 +1110,8 @@ def main():
     total_script_start = time.time()
 
     # 加载场景
-    print("\n[1/3] 加载场景表格...")
-    if not os.path.exists(INPUT_FILE):
-        print(f"  [错误] 找不到输入文件: {INPUT_FILE}")
-        sys.exit(1)
-
-    scenarios = load_scenarios(INPUT_FILE)
-    print(f"  共加载 {sum(len(v) for v in scenarios.values())} 个场景，{len(scenarios)} 个分类")
-
-    scenarios = select_scenarios(scenarios, args.limit, args.sample_size, args.sample_seed)
+    scenarios = select_scenarios(DEFAULT_SCENARIOS, args.limit, args.sample_size, args.sample_seed)
+    print(f"\n[1/3] 场景列表：共 {len(DEFAULT_SCENARIOS)} 个，本次运行 {len(scenarios)} 个")
     if args.sample_size > 0:
         print(f"  随机抽样 {len(scenarios)} 个分类，seed={args.sample_seed}")
     elif args.limit > 0:

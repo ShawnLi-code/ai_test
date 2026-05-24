@@ -3,11 +3,11 @@
 这个项目用于批量测试移动套餐升档外呼话术。脚本会让四个模型协同完成一次自动化压测：
 
 - A模型：扮演AI客服，按 `prompts/A/A_v*.txt` 进行外呼沟通。
-- C模型：扮演用户，按 `prompts/C/C_v*.txt` 和Excel场景动态回复。
+- C模型：扮演用户，按 `prompts/C/C_v*.txt` 和脚本内置的24个场景分类自由回复。
 - D模型：A/C 对话结束后，按 `prompts/D/D_v*.txt` 根据通话记录生成结构化工单 JSON。默认与 A 同模型（豆包）。
 - B模型：扮演质检员，按 `prompts/B/B_v*.txt` 一并审计对话记录和工单内容，输出 JSON 质检结果。
 
-输入文件是 `AI外呼用户反应测试记录表.xlsx`。输出文件会写入 `results/`，该目录默认不提交到Git。
+场景分类内置在脚本的 `DEFAULT_SCENARIOS` 列表中（24个），直接修改脚本即可增减场景。输出文件会写入 `results/`，该目录默认不提交到Git。
 
 如果需要同时观察多个C用户人设如何刁难AI，可以使用 `--persona-c-list` 一次运行多个C人设。输出Excel会为每个C人设生成一个独立工作表，例如 `C_v1测试结果`、`C_v2测试结果`，便于逐个查看完整通话。不合格行会用浅红底高亮，异常行会用浅橙底高亮。
 
@@ -15,8 +15,7 @@
 
 ```text
 .
-├── ai_test_script.py                 # 主测试脚本
-├── AI外呼用户反应测试记录表.xlsx      # 场景表
+├── ai_test_script.py                 # 主测试脚本（DEFAULT_SCENARIOS 内置24个场景分类）
 ├── prompts/
 │   ├── A/                            # AI客服人设 A_v1.txt ... A_vN.txt
 │   ├── B/                            # 质检员人设 B_v1.txt
