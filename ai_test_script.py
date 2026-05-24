@@ -1182,7 +1182,7 @@ def main():
         total_elapsed = time.time() - total_start
 
         # 按场景排序
-        cat_order = list(scenarios.keys())
+        cat_order = list(scenarios)
         results_old.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
         results_new.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
 
@@ -1245,7 +1245,7 @@ def main():
 
         persona_c_desc_map = {c_ver: extract_persona_desc(content) for c_ver, content in persona_c_map.items()}
 
-        cat_order = list(scenarios.keys())
+        cat_order = list(scenarios)
 
         if len(c_versions) > 1:
             results_by_c, elapsed_map = run_test_for_personas(
