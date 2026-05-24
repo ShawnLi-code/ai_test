@@ -6,6 +6,12 @@ __pycache__/
 # 测试结果（不提交Excel，太大了）
 results/
 
+# 归档的旧人设（仅本地保留，不上传）
+prompts/archive/
+
+# 会话日志（本地工具产生，不上传）
+.waylog/
+
 # 本地私密配置
 config.local.json
 

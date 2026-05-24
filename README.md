@@ -16,10 +16,16 @@
 .
 ├── ai_test_script.py                 # 主测试脚本
 ├── AI外呼用户反应测试记录表.xlsx      # 场景表
-├── prompts/                          # A/B/C模型人设和质检规则
+├── prompts/
+│   ├── A/                            # AI客服人设 A_v1.txt ... A_vN.txt
+│   ├── B/                            # 质检员人设 B_v1.txt
+│   ├── C/                            # 模拟用户人设 C_v1.txt ... C_v5.txt
+│   └── archive/                      # 历史版本归档（不参与运行，默认不入Git）
 ├── changelog.json                    # 回归对比摘要
 └── results/                          # 测试输出，默认忽略
 ```
+
+C 人设文件首行 `# 简介: xxx` 会被脚本读出来填到结果 Excel 的顶部表头，让人一眼看出当前 sheet 测的是哪种性格的用户。新增 C 人设时按这个格式加一行简介即可。
 
 ## 环境准备
 
