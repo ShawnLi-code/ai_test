@@ -76,6 +76,7 @@ BASE_URL = config_value("base_url", "ARK_BASE_URL", "https://ark.cn-beijing.volc
 MODEL_A = config_value("model_a", "MODEL_A", "doubao-1-5-pro-32k-250115")   # A模型-豆包(AI客服)
 MODEL_B = config_value("model_b", "MODEL_B", "deepseek-v3-2-251201")         # B模型-DeepSeek(质检)
 MODEL_C = config_value("model_c", "MODEL_C", "doubao-1-5-pro-32k-250115")   # C模型-豆包(模拟用户)
+MODEL_D = config_value("model_d", "MODEL_D", "doubao-1-5-pro-32k-250115")   # D模型-豆包(工单生成，默认与A同模型)
 CONCURRENCY = config_int("concurrency", "TEST_CONCURRENCY", 10)
 PERSONA_CONCURRENCY = config_int("persona_concurrency", "PERSONA_CONCURRENCY", 2)
 API_CONCURRENCY = config_int("api_concurrency", "API_CONCURRENCY", 30)
@@ -354,15 +355,18 @@ def extract_json(text):
     return text
 
 
-def format_dialogue_for_audit(dialogue_history):
-    """将对话历史格式化为B模型可审计的文本"""
+def format_dialogue_for_audit(dialogue_history, ticket_text=""):
+    """将对话历史格式化为B模型可审计的文本；若提供工单文本则附加在末尾。"""
     lines = ["【通话记录】"]
     for round_num, entry in enumerate(dialogue_history, start=1):
         role_label = "AI客服" if entry["role"] == "assistant" else "用户"
         lines.append(f"[第{round_num}轮]")
         lines.append(f"{role_label}：{entry['content']}")
         lines.append("")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if ticket_text:
+        text += "\n【工单内容】\n" + ticket_text.strip()
+    return text
 
 
 def format_dialogue_display(dialogue_history):
@@ -465,9 +469,9 @@ def run_dialogue(client, category, triggers, persona_a, persona_c):
     return dialogue_history, None
 
 
-def run_audit(client, dialogue_history, persona_b):
-    """将对话记录发给B模型质检"""
-    dialogue_text = format_dialogue_for_audit(dialogue_history)
+def run_audit(client, dialogue_history, persona_b, ticket_text=""):
+    """将对话记录（可选携带工单内容）发给B模型质检"""
+    dialogue_text = format_dialogue_for_audit(dialogue_history, ticket_text)
     audit_messages = [
         {"role": "user", "content": f"请审计以下通话记录，严格按JSON格式输出结果。\n\n{dialogue_text}"},
     ]
@@ -486,12 +490,27 @@ def run_audit(client, dialogue_history, persona_b):
         return False, raw, f"B模型返回非JSON格式"
 
 
-def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c, skip_audit=False):
-    """执行一个场景分类的完整测试"""
+def run_ticket(client, dialogue_history, persona_d):
+    """A/C 对话结束后，调 D 模型生成工单 JSON。返回 (ticket_text, error)。"""
+    dialogue_text = format_dialogue_for_audit(dialogue_history)
+    ticket_messages = [
+        {"role": "user", "content": f"{dialogue_text}\n\n用户已挂机"},
+    ]
+    try:
+        raw = call_model(client, MODEL_D, ticket_messages, persona_d, temperature=0.3)
+    except Exception as e:
+        return "", f"D模型调用失败: {e}"
+    return (raw or "").strip(), None
+
+
+def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c,
+                     persona_d=None, skip_audit=False, skip_ticket=False):
+    """执行一个场景分类的完整测试：A/C 对话 → D 生成工单 → B 质检（含工单）。"""
     result = {
         "category": category,
         "triggers": "；".join(triggers),
         "dialogue": "",
+        "ticket_json": "",
         "passed": False,
         "audit_json": "",
         "violation_count": 0,
@@ -507,13 +526,22 @@ def run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c
 
     result["dialogue"] = format_dialogue_display(dialogue_history)
 
+    # D 模型生成工单（A/C 对话结束后跑一次）
+    ticket_text = ""
+    if persona_d and not skip_ticket:
+        ticket_text, ticket_err = run_ticket(client, dialogue_history, persona_d)
+        result["ticket_json"] = ticket_text
+        if ticket_err:
+            result["error"] = ticket_err
+            return result
+
     if skip_audit:
         result["passed"] = None
         result["audit_json"] = '{"results": [], "skipped": true}'
         result["violation_summary"] = "已跳过B模型质检"
         return result
 
-    passed, audit_json, err = run_audit(client, dialogue_history, persona_b)
+    passed, audit_json, err = run_audit(client, dialogue_history, persona_b, ticket_text)
     result["passed"] = passed
     result["audit_json"] = audit_json
 
@@ -558,10 +586,12 @@ def is_retryable_error(error):
     return any(keyword in text for keyword in retryable_keywords)
 
 
-def run_one_scenario_with_retry(client, category, triggers, persona_a, persona_b, persona_c, skip_audit=False):
+def run_one_scenario_with_retry(client, category, triggers, persona_a, persona_b, persona_c,
+                                persona_d=None, skip_audit=False, skip_ticket=False):
     result = None
     for attempt in range(SCENARIO_RETRIES + 1):
-        result = run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c, skip_audit)
+        result = run_one_scenario(client, category, triggers, persona_a, persona_b, persona_c,
+                                  persona_d, skip_audit, skip_ticket)
         if not is_retryable_error(result.get("error")):
             return result
         if attempt < SCENARIO_RETRIES:
@@ -571,7 +601,8 @@ def run_one_scenario_with_retry(client, category, triggers, persona_a, persona_b
     return result
 
 
-def run_test(client, scenarios, persona_a, persona_b, persona_c, label="", skip_audit=False):
+def run_test(client, scenarios, persona_a, persona_b, persona_c, label="",
+             skip_audit=False, persona_d=None, skip_ticket=False):
     """运行完整测试"""
     results = []
     total = len(scenarios)
@@ -584,7 +615,9 @@ def run_test(client, scenarios, persona_a, persona_b, persona_c, label="", skip_
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
         future_map = {}
         for category, triggers in scenarios.items():
-            future = executor.submit(run_one_scenario_with_retry, client, category, triggers, persona_a, persona_b, persona_c, skip_audit)
+            future = executor.submit(run_one_scenario_with_retry, client, category, triggers,
+                                     persona_a, persona_b, persona_c,
+                                     persona_d, skip_audit, skip_ticket)
             future_map[future] = category
 
         for future in as_completed(future_map):
@@ -620,14 +653,17 @@ def run_test(client, scenarios, persona_a, persona_b, persona_c, label="", skip_
     return results, elapsed
 
 
-def run_test_for_personas(client, scenarios, persona_a, persona_b, persona_c_map, skip_audit=False, persona_concurrency=1):
+def run_test_for_personas(client, scenarios, persona_a, persona_b, persona_c_map,
+                          skip_audit=False, persona_concurrency=1,
+                          persona_d=None, skip_ticket=False):
     """对同一批场景运行多个C人设，用于横向对比。"""
     all_results = {}
     elapsed_map = {}
     max_workers = max(1, min(persona_concurrency, len(persona_c_map)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
-            executor.submit(run_test, client, scenarios, persona_a, persona_b, persona_c, c_ver, skip_audit): c_ver
+            executor.submit(run_test, client, scenarios, persona_a, persona_b, persona_c,
+                            c_ver, skip_audit, persona_d, skip_ticket): c_ver
             for c_ver, persona_c in persona_c_map.items()
         }
         for future in as_completed(future_map):
@@ -699,7 +735,7 @@ def write_result_sheet(ws, results, c_persona_label="", c_persona_desc=""):
     )
 
     headers = [
-        "序号", "场景分类", "触发语列表", "对话全文", "质检结果",
+        "序号", "场景分类", "触发语列表", "对话全文", "工单内容", "质检结果",
         "是否合格", "违规项数", "违规摘要", "质检原始JSON", "错误信息"
     ]
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -802,6 +838,7 @@ def write_result_sheet(ws, results, c_persona_label="", c_persona_desc=""):
             r.get("category", ""),
             r.get("triggers", ""),
             r.get("dialogue", ""),
+            r.get("ticket_json", ""),
             result_text,
             passed_text,
             r.get("violation_count", 0),
@@ -819,13 +856,13 @@ def write_result_sheet(ws, results, c_persona_label="", c_persona_desc=""):
             elif r.get("passed") is False:
                 cell.fill = fail_fill
 
-        result_cell = ws.cell(row=row, column=5)
+        result_cell = ws.cell(row=row, column=6)
         if r.get("passed") is True:
             result_cell.fill = pass_fill
         elif r.get("passed") is False and not r.get("error"):
             result_cell.fill = fail_fill
 
-    col_widths = [6, 14, 30, 60, 10, 10, 10, 40, 40, 30]
+    col_widths = [6, 14, 30, 60, 40, 10, 10, 10, 40, 40, 30]
     for col, width in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -835,7 +872,8 @@ def write_result_sheet(ws, results, c_persona_label="", c_persona_desc=""):
     ws.row_dimensions[summary_metric_row].height = 22
     ws.row_dimensions[summary_problem_row].height = 42
     ws.freeze_panes = f"A{data_start_row}"
-    ws.auto_filter.ref = f"A{header_row}:J{data_start_row + len(results) - 1}"
+    last_col_letter = get_column_letter(len(headers))
+    ws.auto_filter.ref = f"A{header_row}:{last_col_letter}{data_start_row + len(results) - 1}"
 
 
 def write_multi_c_excel(results_by_c, output_file, persona_a_ver, persona_b_ver, scenario_order, persona_c_desc_map=None):
@@ -981,7 +1019,7 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
 
 
 def main():
-    global API_KEY, BASE_URL, MODEL_A, MODEL_B, MODEL_C
+    global API_KEY, BASE_URL, MODEL_A, MODEL_B, MODEL_C, MODEL_D
     global INPUT_FILE, CONCURRENCY, PERSONA_CONCURRENCY, API_CONCURRENCY, MAX_ROUNDS, MAX_RETRIES, RETRY_DELAY, SCENARIO_RETRIES, API_SEMAPHORE
 
     parser = argparse.ArgumentParser(description="AI外呼用户反应测试脚本")
@@ -999,6 +1037,8 @@ def main():
                         help="C模型人设版本，如: C_v1(普通) C_v2(投诉) C_v3(法律) C_v4(诱导) C_v5(情绪)")
     parser.add_argument("--persona-c-list", nargs="+",
                         help="一次运行多个C模型人设，并为每个C人设生成独立工作表，如: --persona-c-list C_v1 C_v2 C_v3 C_v4 C_v5")
+    parser.add_argument("--persona-d", default=None,
+                        help="D模型(工单生成)人设版本，如: D_v1")
     parser.add_argument("--limit", type=int, default=0,
                         help="限制测试场景数量，0=全部")
     parser.add_argument("--sample-size", type=int, default=0,
@@ -1019,6 +1059,8 @@ def main():
                         help=f"场景失败后完整重跑次数，默认读取SCENARIO_RETRIES或{SCENARIO_RETRIES}")
     parser.add_argument("--skip-audit", action="store_true",
                         help="只生成A/C对话，不调用B模型质检，用于快速冒烟测试")
+    parser.add_argument("--skip-ticket", action="store_true",
+                        help="跳过D模型工单生成；与--skip-audit互相独立")
     parser.add_argument("--input", default=None,
                         help="输入Excel路径")
 
@@ -1031,6 +1073,7 @@ def main():
         MODEL_A = config.get("model_a") or MODEL_A
         MODEL_B = config.get("model_b") or MODEL_B
         MODEL_C = config.get("model_c") or MODEL_C
+        MODEL_D = config.get("model_d") or MODEL_D
         CONCURRENCY = int(config.get("concurrency", CONCURRENCY))
         PERSONA_CONCURRENCY = int(config.get("persona_concurrency", PERSONA_CONCURRENCY))
         API_CONCURRENCY = int(config.get("api_concurrency", API_CONCURRENCY))
@@ -1070,6 +1113,7 @@ def main():
     print(f"  A模型(AI客服): {MODEL_A}")
     print(f"  B模型(质检):   {MODEL_B}")
     print(f"  C模型(用户):   {MODEL_C}")
+    print(f"  D模型(工单):   {MODEL_D}")
     task_peak = CONCURRENCY * PERSONA_CONCURRENCY
     print(f"  场景并发数: {CONCURRENCY}  C人设并发数: {PERSONA_CONCURRENCY}  最大轮次: {MAX_ROUNDS}")
     print(f"  估算任务峰值: {task_peak}  全局API并发上限: {API_CONCURRENCY}")
@@ -1105,6 +1149,28 @@ def main():
 
     client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
 
+    # 解析 D 人设版本：命令行 > 配置文件 > 自动检测最新
+    if args.persona_d:
+        d_ver = args.persona_d
+    elif config.get("persona_d"):
+        d_ver = config["persona_d"]
+    else:
+        try:
+            d_ver = get_latest_version("D")
+        except FileNotFoundError:
+            d_ver = None
+
+    persona_d = None
+    if d_ver and not args.skip_ticket:
+        try:
+            persona_d = load_persona(d_ver)
+            print(f"  D人设: {d_ver} 已加载")
+        except FileNotFoundError as e:
+            print(f"  [警告] D人设加载失败，将跳过工单生成: {e}")
+            d_ver = None
+    elif args.skip_ticket:
+        print("  [提示] --skip-ticket 已开启，本次不生成工单")
+
     if args.regression:
         # 回归对比模式
         if not args.old or not args.new:
@@ -1131,8 +1197,10 @@ def main():
         print("\n  并发执行两个版本测试...")
         total_start = time.time()
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, persona_c, "旧版", args.skip_audit)
-            future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, persona_c, "新版", args.skip_audit)
+            future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, persona_c,
+                                         "旧版", args.skip_audit, persona_d, args.skip_ticket)
+            future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, persona_c,
+                                         "新版", args.skip_audit, persona_d, args.skip_ticket)
             results_old, elapsed_old = future_old.result()
             results_new, elapsed_new = future_new.result()
         total_elapsed = time.time() - total_start
@@ -1205,7 +1273,9 @@ def main():
 
         if len(c_versions) > 1:
             results_by_c, elapsed_map = run_test_for_personas(
-                client, scenarios, persona_a, persona_b, persona_c_map, args.skip_audit, PERSONA_CONCURRENCY
+                client, scenarios, persona_a, persona_b, persona_c_map,
+                args.skip_audit, PERSONA_CONCURRENCY,
+                persona_d, args.skip_ticket,
             )
             for results in results_by_c.values():
                 results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
@@ -1235,7 +1305,9 @@ def main():
             return
 
         persona_c = next(iter(persona_c_map.values()))
-        results, elapsed = run_test(client, scenarios, persona_a, persona_b, persona_c, skip_audit=args.skip_audit)
+        results, elapsed = run_test(client, scenarios, persona_a, persona_b, persona_c,
+                                    skip_audit=args.skip_audit,
+                                    persona_d=persona_d, skip_ticket=args.skip_ticket)
         results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
 
         print(f"\n[3/3] 写入Excel...")

@@ -4,6 +4,7 @@
   "model_a": "doubao-1-5-pro-32k-250115",
   "model_b": "deepseek-v3-2-251201",
   "model_c": "doubao-1-5-pro-32k-250115",
+  "model_d": "doubao-1-5-pro-32k-250115",
   "concurrency": 10,
   "persona_concurrency": 2,
   "max_retries": 2,
@@ -13,5 +14,6 @@
   "persona_a": "",
   "persona_b": "",
   "persona_c": "C_v1",
-  "persona_c_list": []
+  "persona_c_list": [],
+  "persona_d": ""
 }
