@@ -1,10 +1,11 @@
 # AI外呼用户反应测试
 
-这个项目用于批量测试移动套餐升档外呼话术。脚本会让三个模型协同完成一次自动化压测：
+这个项目用于批量测试移动套餐升档外呼话术。脚本会让四个模型协同完成一次自动化压测：
 
-- A模型：扮演AI客服，按 `prompts/A_v*.txt` 进行外呼沟通。
-- C模型：扮演用户，按 `prompts/C_v*.txt` 和Excel场景动态回复。
-- B模型：扮演质检员，按 `prompts/B_v1.txt` 审计完整对话并输出JSON结果。
+- A模型：扮演AI客服，按 `prompts/A/A_v*.txt` 进行外呼沟通。
+- C模型：扮演用户，按 `prompts/C/C_v*.txt` 和Excel场景动态回复。
+- D模型：A/C 对话结束后，按 `prompts/D/D_v*.txt` 根据通话记录生成结构化工单 JSON。默认与 A 同模型（豆包）。
+- B模型：扮演质检员，按 `prompts/B/B_v*.txt` 一并审计对话记录和工单内容，输出 JSON 质检结果。
 
 输入文件是 `AI外呼用户反应测试记录表.xlsx`。输出文件会写入 `results/`，该目录默认不提交到Git。
 
@@ -20,6 +21,7 @@
 │   ├── A/                            # AI客服人设 A_v1.txt ... A_vN.txt
 │   ├── B/                            # 质检员人设 B_v1.txt
 │   ├── C/                            # 模拟用户人设 C_v1.txt ... C_v5.txt
+│   ├── D/                            # 工单生成人设 D_v1.txt
 │   └── archive/                      # 历史版本归档（不参与运行，默认不入Git）
 ├── changelog.json                    # 回归对比摘要
 └── results/                          # 测试输出，默认忽略
@@ -52,6 +54,7 @@ Copy-Item config.example.json config.local.json
   "model_a": "doubao-1-5-pro-32k-250115",
   "model_b": "deepseek-v3-2-251201",
   "model_c": "doubao-1-5-pro-32k-250115",
+  "model_d": "doubao-1-5-pro-32k-250115",
   "concurrency": 10,
   "persona_concurrency": 2,
   "max_retries": 2,
@@ -61,7 +64,8 @@ Copy-Item config.example.json config.local.json
   "persona_a": "",
   "persona_b": "",
   "persona_c": "C_v1",
-  "persona_c_list": ["C_v1", "C_v2", "C_v3", "C_v4", "C_v5"]
+  "persona_c_list": ["C_v1", "C_v2", "C_v3", "C_v4", "C_v5"],
+  "persona_d": ""
 }
 ```
 
@@ -105,6 +109,14 @@ python ai_test_script.py --sample-size 10 --sample-seed 20260523
 python ai_test_script.py --limit 3 --skip-audit
 ```
 
+跳过 D 模型工单生成（B 质检仍会跑，工单部分按 N/A 处理）：
+
+```powershell
+python ai_test_script.py --limit 3 --skip-ticket
+```
+
+`--skip-audit` 与 `--skip-ticket` 互相独立，可以单独使用，也可以一起加。
+
 回归对比：
 
 ```powershell
@@ -113,7 +125,7 @@ python ai_test_script.py --regression --old A_v1 B_v1 --new A_v2 B_v1 --persona-
 
 ## 测试时间太久的优化方案
 
-当前耗时主要来自模型调用次数。一个场景通常包含多轮 A/C 对话，结束后还会调用一次 B 质检；回归模式还会同时跑旧版和新版，所以总调用量会明显放大。
+当前耗时主要来自模型调用次数。一个场景通常包含多轮 A/C 对话，结束后会调用一次 D 模型生成工单，再调用一次 B 质检；回归模式还会同时跑旧版和新版，所以总调用量会明显放大。
 
 如果重点是观察不同C用户怎么刁难AI，建议保留C模型实时生成，并用 `--persona-c-list` 对比多个C人设。调试阶段可以加 `--skip-audit` 先跳过B质检，这样仍能看到各C人设的完整通话，同时少掉每个场景每个C人设的一次B模型调用。
 
@@ -122,6 +134,7 @@ python ai_test_script.py --regression --old A_v1 B_v1 --new A_v2 B_v1 --persona-
 - `--limit N`：按Excel顺序只跑前N个分类，适合开发调试。
 - `--sample-size N --sample-seed S`：随机抽样N个分类，适合稳定复现的快速回归。
 - `--skip-audit`：跳过B模型质检，只验证A/C对话生成，能省掉每个场景一次B模型调用。
+- `--skip-ticket`：跳过D模型工单生成，B 质检照常跑（工单字段按 N/A 处理），能省掉每个场景一次 D 模型调用。
 - `--max-rounds N`：降低单通对话最大轮次，例如先用 `--max-rounds 4` 做冒烟测试。
 - `--concurrency N`：提高并发可以缩短墙钟时间，但会增加限流风险；如果接口报限流，反而要降低并发。
 - `--persona-concurrency N`：多个C人设并发运行。总并发大约是 `concurrency * persona_concurrency`，设置太高容易触发限流。
