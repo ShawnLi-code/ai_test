@@ -35,6 +35,210 @@
         "B": "B_v1"
       },
       "change_summary": "合格率: 7/10 → 10/10"
+    },
+    {
+      "timestamp": "2026-05-25T11:00:57.322285",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 24/24 → 22/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:03:58.391387",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 23/24 → 21/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:06:47.885105",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 11/24 → 17/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:09:27.607477",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 20/24 → 24/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:10:40.367079",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 24/24 → 24/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:45:56.971184",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 23/24 → 23/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:45:56.981221",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 23/24 → 24/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:45:56.991275",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 11/24 → 20/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:45:57.003905",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 21/24 → 24/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:45:57.014269",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 23/24 → 22/24"
+    },
+    {
+      "timestamp": "2026-05-25T11:54:36.105387",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 0/3 → 0/3"
+    },
+    {
+      "timestamp": "2026-05-25T11:54:36.114754",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 0/3 → 0/3"
+    },
+    {
+      "timestamp": "2026-05-25T12:11:09.864262",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 21/24 → 24/24"
+    },
+    {
+      "timestamp": "2026-05-25T12:11:09.878788",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 23/24 → 23/24"
+    },
+    {
+      "timestamp": "2026-05-25T12:11:09.890635",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 18/24 → 19/24"
+    },
+    {
+      "timestamp": "2026-05-25T12:11:09.900095",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 21/24 → 24/24"
+    },
+    {
+      "timestamp": "2026-05-25T12:11:09.916621",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 24/24 → 24/24"
     }
   ]
 }

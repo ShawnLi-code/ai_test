@@ -895,23 +895,32 @@ def write_multi_c_excel(results_by_c, output_file, persona_a_ver, persona_b_ver,
     print(f"\n多C人设结果已保存到: {output_file}")
 
 
-def write_regression_excel(results_old, results_new, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver):
-    """回归对比：并排输出Excel"""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "回归对比"
+def write_regression_sheet(ws, results_old, results_new, old_a_ver, new_a_ver, old_b_ver, new_b_ver,
+                           c_persona_label="", c_persona_desc=""):
+    """写入单个回归对比工作表。c_persona_label/desc 用于顶部 C 人设信息。"""
+    has_persona_header = bool(c_persona_label or c_persona_desc)
+    persona_row_offset = 1 if has_persona_header else 0
+    summary_rows = 3
+    summary_title_row = 1 + persona_row_offset
+    summary_metric_row = 2 + persona_row_offset
+    summary_problem_row = 3 + persona_row_offset
+    header_row = summary_rows + 1 + persona_row_offset
+    data_start_row = header_row + 1
 
     headers = [
         "序号", "场景分类",
-        f"旧版{old_a_ver}对话", f"旧版{old_a_ver}质检结果", f"旧版{old_a_ver}违规摘要",
-        f"新版{new_a_ver}对话", f"新版{new_a_ver}质检结果", f"新版{new_a_ver}违规摘要",
+        f"旧版{old_a_ver}对话", f"旧版{old_a_ver}工单", f"旧版{old_a_ver}质检结果", f"旧版{old_a_ver}违规摘要",
+        f"新版{new_a_ver}对话", f"新版{new_a_ver}工单", f"新版{new_a_ver}质检结果", f"新版{new_a_ver}违规摘要",
         "变化", "详情"
     ]
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    persona_header_fill = PatternFill(start_color="2E75B6", end_color="2E75B6", fill_type="solid")
     header_font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=10)
+    persona_header_font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=11)
     cell_font = Font(name="微软雅黑", size=9)
     wrap_align = Alignment(wrap_text=True, vertical="top")
     center_align = Alignment(horizontal="center", vertical="top")
+    persona_align = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
     pass_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     improve_fill = PatternFill(start_color="B4C7E7", end_color="B4C7E7", fill_type="solid")
@@ -921,20 +930,121 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
         top=Side(style="thin"), bottom=Side(style="thin"),
     )
 
+    if has_persona_header:
+        if c_persona_label and c_persona_desc:
+            persona_text = f"C人设：{c_persona_label}  —  {c_persona_desc}"
+        else:
+            persona_text = f"C人设：{c_persona_label or c_persona_desc}"
+        cell = ws.cell(row=1, column=1, value=persona_text)
+        cell.fill = persona_header_fill
+        cell.font = persona_header_font
+        cell.alignment = persona_align
+        cell.border = thin_border
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+        ws.row_dimensions[1].height = 28
+
+    # 汇总信息（先计算，后面用）
+    old_passed_count = sum(1 for r in results_old if r["passed"] and not r["error"])
+    old_failed_count = sum(1 for r in results_old if r["passed"] is False and not r["error"])
+    old_error_count = sum(1 for r in results_old if r["error"])
+    new_passed_count = sum(1 for r in results_new if r["passed"] and not r["error"])
+    new_failed_count = sum(1 for r in results_new if r["passed"] is False and not r["error"])
+    new_error_count = sum(1 for r in results_new if r["error"])
+    fixed_count = sum(1 for r_old, r_new in zip(results_old, results_new) if not r_old["passed"] and r_new["passed"])
+    regressed_count = sum(1 for r_old, r_new in zip(results_old, results_new) if r_old["passed"] and not r_new["passed"])
+
+    problem_items = []
+    old_map_for_summary = {r["category"]: r for r in results_old}
+    new_map_for_summary = {r["category"]: r for r in results_new}
+    all_cats = list(dict.fromkeys([r["category"] for r in results_old + results_new]))
+    for i, cat in enumerate(all_cats):
+        old_r = old_map_for_summary.get(cat, {})
+        new_r = new_map_for_summary.get(cat, {})
+        old_p = old_r.get("passed")
+        new_p = new_r.get("passed")
+        detail_row = data_start_row + i
+        if old_p is False or new_p is False or old_r.get("error") or new_r.get("error"):
+            parts = []
+            if old_p is False and not old_r.get("error"):
+                parts.append(f"旧版不合格(违规{old_r.get('violation_count',0)}项)")
+            if old_r.get("error"):
+                parts.append(f"旧版异常: {str(old_r.get('error',''))[:40]}")
+            if new_p is False and not new_r.get("error"):
+                parts.append(f"新版不合格(违规{new_r.get('violation_count',0)}项)")
+            if new_r.get("error"):
+                parts.append(f"新版异常: {str(new_r.get('error',''))[:40]}")
+            problem_items.append(f"明细第{detail_row}行({cat}): {'; '.join(parts)}")
+
+    summary_title_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    summary_metric_fill = PatternFill(start_color="D9EAF7", end_color="D9EAF7", fill_type="solid")
+    summary_problem_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    summary_title_font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=12)
+    summary_label_font = Font(name="微软雅黑", bold=True, size=9)
+
+    ws.cell(row=summary_title_row, column=1, value="结果摘要")
+    ws.cell(row=summary_metric_row, column=1, value="旧版合格")
+    ws.cell(row=summary_metric_row, column=2, value=old_passed_count)
+    ws.cell(row=summary_metric_row, column=3, value="旧版不合格")
+    ws.cell(row=summary_metric_row, column=4, value=old_failed_count)
+    ws.cell(row=summary_metric_row, column=5, value="修复")
+    ws.cell(row=summary_metric_row, column=6, value=fixed_count)
+    ws.cell(row=summary_metric_row, column=7, value="新增违规")
+    ws.cell(row=summary_metric_row, column=8, value=regressed_count)
+    ws.cell(row=summary_metric_row, column=9, value="新版合格")
+    ws.cell(row=summary_metric_row, column=10, value=new_passed_count)
+    ws.cell(row=summary_metric_row, column=11, value="新版不合格")
+    ws.cell(row=summary_metric_row, column=12, value=new_failed_count)
+    ws.cell(row=summary_problem_row, column=1, value="问题定位")
+    if problem_items:
+        ws.cell(row=summary_problem_row, column=2, value="；".join(problem_items))
+    else:
+        ws.cell(row=summary_problem_row, column=2, value="无不合格或异常")
+
+    # 格式化摘要行
+    for row in range(1, summary_rows + 1 + persona_row_offset):
+        r = row
+        for col in range(1, len(headers) + 1):
+            cell = ws.cell(row=r, column=col)
+            cell.alignment = wrap_align
+            cell.border = thin_border
+            if has_persona_header and r == 1:
+                continue  # 已设置
+            elif r == summary_title_row:
+                cell.fill = summary_title_fill
+                cell.font = summary_title_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif r == summary_metric_row:
+                cell.fill = summary_metric_fill
+                if col in (1, 3, 5, 7, 9, 11):
+                    cell.font = summary_label_font
+                else:
+                    cell.font = cell_font
+            else:
+                cell.fill = summary_problem_fill if problem_items else pass_fill
+                if col == 1:
+                    cell.font = summary_label_font
+                else:
+                    cell.font = cell_font
+
+    ws.merge_cells(start_row=summary_title_row, start_column=1, end_row=summary_title_row, end_column=len(headers))
+    ws.merge_cells(start_row=summary_problem_row, start_column=2, end_row=summary_problem_row, end_column=len(headers))
+    ws.row_dimensions[summary_title_row].height = 24
+    ws.row_dimensions[summary_metric_row].height = 22
+    ws.row_dimensions[summary_problem_row].height = 42
+
     for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
+        cell = ws.cell(row=header_row, column=col, value=header)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = center_align
         cell.border = thin_border
 
-    # 按场景分类对齐
     old_map = {r["category"]: r for r in results_old}
     new_map = {r["category"]: r for r in results_new}
     all_categories = list(dict.fromkeys([r["category"] for r in results_old + results_new]))
 
     for i, cat in enumerate(all_categories):
-        row = i + 2
+        row = data_start_row + i
         old_r = old_map.get(cat, {})
         new_r = new_map.get(cat, {})
 
@@ -968,9 +1078,11 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
             i + 1,
             cat,
             old_r.get("dialogue", ""),
+            old_r.get("ticket_json", ""),
             "跳过质检" if old_passed is None else ("合格" if old_passed else ("不合格" if not old_r.get("error") else "异常")),
             old_r.get("violation_summary", ""),
             new_r.get("dialogue", ""),
+            new_r.get("ticket_json", ""),
             "跳过质检" if new_passed is None else ("合格" if new_passed else ("不合格" if not new_r.get("error") else "异常")),
             new_r.get("violation_summary", ""),
             change,
@@ -983,9 +1095,8 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
             cell.alignment = wrap_align
             cell.border = thin_border
 
-        # 质检结果列着色
         old_result_cell = ws.cell(row=row, column=5)
-        new_result_cell = ws.cell(row=row, column=8)
+        new_result_cell = ws.cell(row=row, column=9)
         if old_passed is True:
             old_result_cell.fill = pass_fill
         elif old_passed is False and not old_r.get("error"):
@@ -995,20 +1106,56 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
         elif new_passed is False and not new_r.get("error"):
             new_result_cell.fill = fail_fill
 
-        # 变化列着色
-        change_cell = ws.cell(row=row, column=9)
+        change_cell = ws.cell(row=row, column=11)
         if change_fill:
             change_cell.fill = change_fill
 
-    col_widths = [6, 14, 50, 10, 40, 50, 10, 40, 12, 60]
+    col_widths = [6, 14, 50, 40, 10, 40, 50, 40, 10, 40, 12, 60]
     for col, width in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
+    ws.freeze_panes = f"A{data_start_row}"
+    last_col = get_column_letter(len(headers))
+    ws.auto_filter.ref = f"A{header_row}:{last_col}{data_start_row + len(all_categories) - 1}"
 
+
+def write_regression_excel(results_old, results_new, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver):
+    """回归对比：单C人设输出一个Excel（兼容旧接口）"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "回归对比"
+    write_regression_sheet(ws, results_old, results_new, old_a_ver, new_a_ver, old_b_ver, new_b_ver)
     wb.save(output_file)
     print(f"\n回归对比结果已保存到: {output_file}")
+
+
+def write_multi_c_regression_excel(results_by_c, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver,
+                                   scenario_order, persona_c_desc_map=None):
+    """多C人设回归对比：每个C人设一个独立工作表。"""
+    persona_c_desc_map = persona_c_desc_map or {}
+    wb = openpyxl.Workbook()
+    default_ws = wb.active
+    wb.remove(default_ws)
+
+    for c_ver, (results_old, results_new) in results_by_c.items():
+        c_short = c_ver.replace("C_", "")
+        ws = wb.create_sheet(f"{c_ver}对比"[:31])
+        old_ordered = sorted(
+            results_old,
+            key=lambda r: scenario_order.index(r["category"]) if r["category"] in scenario_order else 999,
+        )
+        new_ordered = sorted(
+            results_new,
+            key=lambda r: scenario_order.index(r["category"]) if r["category"] in scenario_order else 999,
+        )
+        write_regression_sheet(
+            ws, old_ordered, new_ordered, old_a_ver, new_a_ver, old_b_ver, new_b_ver,
+            c_persona_label=c_ver,
+            c_persona_desc=persona_c_desc_map.get(c_ver, ""),
+        )
+
+    wb.save(output_file)
+    print(f"\n多C回归对比结果已保存到: {output_file}")
 
 
 def main():
@@ -1156,63 +1303,99 @@ def main():
         old_a_ver, old_b_ver = args.old
         new_a_ver, new_b_ver = args.new
 
-        print(f"\n[2/3] 回归对比模式: {old_a_ver}/{old_b_ver} vs {new_a_ver}/{new_b_ver}, C={args.persona_c}")
+        # 解析 C 人设列表：--persona-c-list > --persona-c > 配置文件 > 默认
+        if args.persona_c_list:
+            c_versions = args.persona_c_list
+        elif args.persona_c:
+            c_versions = [args.persona_c]
+        elif config.get("persona_c_list"):
+            c_versions = config["persona_c_list"]
+        else:
+            c_versions = [config.get("persona_c") or "C_v1"]
 
-        # 加载人设
+        c_list_str = ",".join(c_versions)
+        print(f"\n[2/3] 回归对比模式: {old_a_ver}/{old_b_ver} vs {new_a_ver}/{new_b_ver}, C={c_list_str}")
+
+        # 加载 A/B 人设
         try:
             persona_a_old = load_persona(old_a_ver)
             persona_b_old = load_persona(old_b_ver)
             persona_a_new = load_persona(new_a_ver)
             persona_b_new = load_persona(new_b_ver)
-            persona_c = load_persona(args.persona_c)
         except FileNotFoundError as e:
             print(f"  [错误] {e}")
             sys.exit(1)
 
-        # 并发跑两个版本
-        print("\n  并发执行两个版本测试...")
+        # 加载所有 C 人设
+        persona_c_map = {}
+        persona_c_desc_map = {}
+        for c_ver in c_versions:
+            try:
+                content = load_persona(c_ver)
+                persona_c_map[c_ver] = content
+                persona_c_desc_map[c_ver] = extract_persona_desc(content)
+            except FileNotFoundError as e:
+                print(f"  [错误] {e}")
+                sys.exit(1)
+
+        # 逐个 C 人设跑回归对比
+        results_by_c = {}
+        elapsed_by_c = {}
         total_start = time.time()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, persona_c,
-                                         "旧版", args.skip_audit, persona_d, args.skip_ticket)
-            future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, persona_c,
-                                         "新版", args.skip_audit, persona_d, args.skip_ticket)
-            results_old, elapsed_old = future_old.result()
-            results_new, elapsed_new = future_new.result()
+        for c_ver in c_versions:
+            persona_c = persona_c_map[c_ver]
+            print(f"\n  [{c_ver}] 并发执行新旧版本测试...")
+            c_start = time.time()
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_old = executor.submit(run_test, client, scenarios, persona_a_old, persona_b_old, persona_c,
+                                             "旧版", args.skip_audit, persona_d, args.skip_ticket)
+                future_new = executor.submit(run_test, client, scenarios, persona_a_new, persona_b_new, persona_c,
+                                             "新版", args.skip_audit, persona_d, args.skip_ticket)
+                results_old, elapsed_old = future_old.result()
+                results_new, elapsed_new = future_new.result()
+            c_elapsed = time.time() - c_start
+
+            results_by_c[c_ver] = (results_old, results_new)
+            elapsed_by_c[c_ver] = (elapsed_old, elapsed_new)
+
+            old_passed = sum(1 for r in results_old if r["passed"] and not r["error"])
+            new_passed = sum(1 for r in results_new if r["passed"] and not r["error"])
+            fixed = sum(1 for r_old, r_new in zip(results_old, results_new) if not r_old["passed"] and r_new["passed"])
+            regressed = sum(1 for r_old, r_new in zip(results_old, results_new) if r_old["passed"] and not r_new["passed"])
+            print(f"  [{c_ver}] 旧版: {old_passed}/{len(results_old)}  新版: {new_passed}/{len(results_new)}  "
+                  f"修复: {fixed}  新增违规: {regressed}  耗时: {format_duration(c_elapsed)}")
+
         total_elapsed = time.time() - total_start
 
-        # 按场景排序
-        cat_order = list(scenarios)
-        results_old.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
-        results_new.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
-
-        # 写Excel
-        print(f"\n[3/3] 写入回归对比Excel...")
+        # 写 Excel
+        print(f"\n[3/3] 写入多C回归对比Excel...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        latest_name = f"回归对比_{old_a_ver}_vs_{new_a_ver}.xlsx"
+        c_part = "-".join(c_versions)
+        latest_name = f"回归对比_{old_a_ver}_vs_{new_a_ver}_{timestamp}.xlsx"
         output_file, latest_file = build_output_paths(
             timestamp,
-            f"regression_{old_a_ver}_{old_b_ver}_vs_{new_a_ver}_{new_b_ver}_{args.persona_c}",
+            f"regression_{old_a_ver}_{old_b_ver}_vs_{new_a_ver}_{new_b_ver}_{c_part}",
             latest_name,
         )
-        write_regression_excel(results_old, results_new, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver)
+        cat_order = list(scenarios)
+        write_multi_c_regression_excel(results_by_c, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver,
+                                       cat_order, persona_c_desc_map)
         copy_to_latest(output_file, latest_file)
 
-        # 更新变更日志
-        update_changelog(old_a_ver, new_a_ver, old_b_ver, new_b_ver, results_old, results_new)
+        # 更新变更日志（为每个 C 人设写入一条）
+        for c_ver in c_versions:
+            results_old, results_new = results_by_c[c_ver]
+            update_changelog(old_a_ver, new_a_ver, old_b_ver, new_b_ver, results_old, results_new)
 
         # 汇总
-        old_passed = sum(1 for r in results_old if r["passed"] and not r["error"])
-        new_passed = sum(1 for r in results_new if r["passed"] and not r["error"])
-        fixed = sum(1 for r_old, r_new in zip(results_old, results_new) if not r_old["passed"] and r_new["passed"])
-        regressed = sum(1 for r_old, r_new in zip(results_old, results_new) if r_old["passed"] and not r_new["passed"])
-
         print("\n" + "=" * 60)
-        print(f"  回归对比完成")
-        print(f"  旧版 ({old_a_ver}/{old_b_ver}): {old_passed}/{len(results_old)} 合格  耗时: {format_duration(elapsed_old)}")
-        print(f"  新版 ({new_a_ver}/{new_b_ver}): {new_passed}/{len(results_new)} 合格  耗时: {format_duration(elapsed_new)}")
-        print(f"  修复: {fixed} 项")
-        print(f"  新增违规: {regressed} 项")
+        print(f"  回归对比完成: {old_a_ver}/{old_b_ver} vs {new_a_ver}/{new_b_ver}")
+        for c_ver in c_versions:
+            results_old, results_new = results_by_c[c_ver]
+            old_p = sum(1 for r in results_old if r["passed"] and not r["error"])
+            new_p = sum(1 for r in results_new if r["passed"] and not r["error"])
+            el_old, el_new = elapsed_by_c[c_ver]
+            print(f"  {c_ver}: {old_p}/{len(results_old)} → {new_p}/{len(results_new)}  旧耗时: {format_duration(el_old)}  新耗时: {format_duration(el_new)}")
         print(f"  总耗时: {format_duration(total_elapsed)}")
         print(f"  本次测试总耗时: {format_duration(time.time() - total_script_start)}")
         print("=" * 60)
@@ -1258,7 +1441,7 @@ def main():
 
             print(f"\n[3/3] 写入多C人设Excel...")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            latest_name = f"AI外呼多C测试结果_{a_ver}_{b_ver}.xlsx"
+            latest_name = f"AI外呼多C测试结果_{a_ver}_{b_ver}_{timestamp}.xlsx"
             output_file, latest_file = build_output_paths(
                 timestamp,
                 f"{a_ver}_{b_ver}_{'-'.join(c_versions)}",
@@ -1289,7 +1472,7 @@ def main():
         print(f"\n[3/3] 写入Excel...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         c_ver = next(iter(persona_c_map.keys()))
-        latest_name = f"AI外呼测试结果_{a_ver}_{b_ver}_{c_ver}.xlsx"
+        latest_name = f"AI外呼测试结果_{a_ver}_{b_ver}_{c_ver}_{timestamp}.xlsx"
         output_file, latest_file = build_output_paths(
             timestamp,
             f"{a_ver}_{b_ver}_{c_ver}",
