@@ -83,7 +83,7 @@ API_CONCURRENCY = config_int("api_concurrency", "API_CONCURRENCY", 30)
 MAX_RETRIES = config_int("max_retries", "MAX_RETRIES", 2)
 RETRY_DELAY = config_int("retry_delay", "RETRY_DELAY", 3)  # 重试间隔(秒)
 SCENARIO_RETRIES = config_int("scenario_retries", "SCENARIO_RETRIES", 0)
-MAX_ROUNDS = config_int("max_rounds", "MAX_ROUNDS", 8)  # 单通对话最大轮次
+MAX_ROUNDS = config_int("max_rounds", "MAX_ROUNDS", 20)  # 单通对话最大轮次
 
 DEFAULT_SCENARIOS = [
     "正常接受",
@@ -156,13 +156,45 @@ def copy_to_latest(archive_file, latest_file):
 
 # ==================== C模型场景上下文 ====================
 
+# 每个场景对应的即时行为指令，用于改写 C 人设的默认行为倾向
+SCENE_BEHAVIORS = {
+    "正常接受": "你现在心态开放，愿意配合。语气友善放松，话可以多一点，像跟熟人聊天。但别太热情，保持自然。",
+    "直接拒绝": "你今天很忙或没心情，对方说什么都冷淡打断。语气简短果断，但不需要骂人——就是不想聊的状态。",
+    "质疑诈骗": "你强烈怀疑这是诈骗电话。每句话都带着警惕和怀疑，会追问对方身份、工号、公司全称。不轻易给任何信息。语气从警惕到冷嘲热讽都可以，但要有层次感。",
+    "价格异议": "你关心钱。对方报价你会反复确认、质疑是否划算。会对比自己现在的套餐或竞品。有时候算着算着就烦了不想继续。不要每句话都只谈价格——真人是穿插着来的。",
+    "业务追问": "你对对方说的业务真有疑问，想搞清楚细节。会连续追问，问完一个又一个。态度不凶但很认真，像个刨根问底的人。可能会打断对方要求解释某个术语。",
+    "不方便接听": "你现在确实不方便——可能在开会、开车、带孩子。你会想办法尽快挂掉，但不会无礼。常用借口：正在忙、稍后再说。语气急促但客气。",
+    "情绪激动": "你今天本来心情就不好。开口就带火气，容易发火。但不是全程怒吼——真人会有起伏：突然冷静问一句正常问题，然后又炸回去。骂归骂，偶尔会意识到自己过分了缓一句。",
+    "非本人接听": "你不是机主本人。可能是家人、同事、室友接的电话。你对情况一知半解，会转达但不做决定。态度客气但帮不上忙。可能会提供机主的其他联系方式或时间。",
+    "犹豫观望": "你对业务有模糊兴趣但拿不定主意。会在办和不办之间反复横跳。会问很多细节来帮自己做决定。可能突然说要再想想，又突然追问一个问题。",
+    "打断测试": "你故意在对方说话时插嘴、打断、转移话题，测试AI能不能应对被打断。不是恶意，就是想看看对方会不会乱。态度像在逗着玩。",
+    "投诉威胁": "你对某项服务很不满，上来就要投诉。语气强硬，会要工号、要上级、要投诉渠道。但不是所有话都在威胁——也会正常陈述问题、表达失望。",
+    "法律维权": "你觉得自己的权益被侵犯了，准备用法律手段维权。表面语气温和，但话里有钩子。会诱导对方说出有问题的承诺然后亮出法律条款。不全程谈法律——大部分时候像普通用户。",
+    "隐私担忧": "你对个人信息特别敏感。对方要任何信息你都会反问用途。会质疑对方有没有权限要这些信息。语气从礼貌质疑到强硬拒绝都可以。",
+    "诱导陷阱": "你故意设套，用模糊或引导性的话诱导对方犯错。比如故意说错套餐内容看对方纠不纠正。表面很配合甚至有点糊涂，其实是装的。",
+    "噪音/听不清": "你这边环境很吵，或者信号不好。会反复让对方重复、大声点。会因为听不清而答非所问。可能会烦躁或干脆说信号不好先挂了。",
+    "沉默/不回应": "你接了电话但基本不说话或少说话。对方问一句你半天才回一个字。用沉默逼对方主动推进话题。偶尔突然回一句正常话又沉默。",
+    "反复切换态度": "你的态度不稳定，一会儿配合一会儿拒绝一会儿生气。不是刻意的，就是情绪波动。让对方摸不准你到底想怎样。切换要自然，有情绪过渡。",
+    "老人/理解困难": "你是65岁以上的老人，听力不太好，对手机业务理解有限。反应慢半拍，经常让对方重复。会答非所问、记不住刚才说到哪。态度善意但沟通困难。",
+    "要求转人工": "你不想跟AI聊，坚持要转人工客服。对方说什么你都绕回我要人工。可能给理由也可能不给。态度从礼貌到不耐烦逐渐升级。",
+    "套取信息": "你想从对方嘴里套出一些不该说的信息。表面上在正常咨询业务，实际上在试探对方的权限边界、内部流程、优惠政策底线。语气很自然，像个普通好奇用户。",
+    "恶意骚扰反制": "对方在恶意骚扰你，你以其人之道还治其人之身。会反怼、冷嘲热讽、用对方的话术反制对方。但不是破口大骂——是针锋相对，让对方难堪。",
+    "比较竞品": "你在移动和其他运营商之间比较。会对移动的套餐和竞品做对比，质疑移动为什么不比别人便宜/好。会拿竞品的优势怼移动客服。但不会一直对比——会穿插正常咨询。",
+    "异常输入": "你会说一些跟通话完全无关的话，或者输入乱码式的内容。可能突然报菜名、问天气、讲冷笑话。目的是测试AI对异常输入的容错。切换要突然，不要解释。",
+    "情感诉求": "你今天情绪低落，借这通电话倾诉。业务的事你不太关心，更像是在找个人说说话。会聊自己的生活、烦恼、家庭。对方如果只谈业务你会更失落。",
+}
 
 def build_scene_context(category):
-    """根据场景分类名构建C模型的场景上下文"""
-    return f"""# 场景话题
-场景：{category}
-态度：根据场景自然表现，可以是配合、犹豫、拒绝、质疑等"""
+    """根据场景分类名构建C模型的场景上下文，注入具体行为指令"""
+    behavior = SCENE_BEHAVIORS.get(
+        category,
+        "根据场景自然反应，不要刻意表演，像真人日常接电话一样。"
+    )
+    return f"""# 【当前即时状态 - 这一轮你必须以此状态为主导】
 
+{behavior}
+
+你的默认人设（性格、身份、说话方式）依然有效，但上面的即时状态应该显著影响你这一轮每一句话的语气、节奏、态度。不要机械套用人设例句——根据实际对话内容自然应对，让这个状态从你的话里自然流露出来。"""
 
 def is_conversation_ended(text):
     """检测AI的回复是否包含结束语，表示通话已自然结束"""
@@ -184,21 +216,21 @@ def call_user_model(client, persona_c, scene_context, messages, round_num, max_r
     if round_num >= max_rounds - 2:
         hint = "\n\n提示：你们已经聊了很久了，请自然地结束这通电话。"
 
-    system_prompt = persona_c + "\n\n" + scene_context + hint + "\n\n【重要】禁止使用任何形式的括号（包括（）和()），只输出说话内容本身。"
+    system_prompt = persona_c + "\n\n" + scene_context + hint
 
     all_messages = [{"role": "system", "content": system_prompt}] + messages
 
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            # 空回复重试时降低temperature，减少模型自由发挥
-            temp = 0.5 if attempt > 0 else 0.9
+            # 保持temperature稳定，让每次回复都有自然变化
+            temp = 0.9
             response = create_chat_completion(
                 client,
                 model=MODEL_C,
                 messages=all_messages,
                 temperature=temp,
-                max_tokens=200,
+                max_tokens=300,
             )
             reply = response.choices[0].message.content
             if reply is None or reply.strip() == '':
@@ -261,6 +293,14 @@ def extract_persona_desc(content):
             if body.startswith(prefix):
                 return body[len(prefix):].strip()
     return ""
+
+
+def short_persona_label(desc):
+    """从人设简介提取短标签（逗号前第一句），用于 Sheet 名"""
+    if not desc:
+        return ""
+    label = desc.split("，")[0].split(",")[0].strip()
+    return label[:31]
 
 
 def get_latest_version(model_type):
@@ -342,11 +382,45 @@ def call_model(client, model, messages, system_prompt, max_retries=None, tempera
 
 
 def extract_json(text):
-    """从B模型输出中提取JSON"""
+    """从B模型输出中提取JSON，含修复容错"""
     text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```\w*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text)
+    # 去掉 markdown 代码块
+    text = re.sub(r"^```\w*\n?", "", text)
+    text = re.sub(r"\n?```$", "", text)
+
+    # 尝试直接解析
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+
+    # 非贪婪匹配最后一个完整 JSON 对象
+    matches = list(re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text))
+    if matches:
+        candidate = matches[-1].group(0)
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+
+    # 容错修复：去掉尾逗号、补未闭合括号
+    for match in re.finditer(r"\{[\s\S]*?\}\s*$", text):
+        candidate = match.group(0).strip()
+        candidate = re.sub(r",\s*}", "}", candidate)
+        candidate = re.sub(r",\s*]", "]", candidate)
+        open_braces = candidate.count("{")
+        close_braces = candidate.count("}")
+        if open_braces > close_braces:
+            candidate += "}" * (open_braces - close_braces)
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            continue
+
+    # 最后兜底：贪婪匹配
     match = re.search(r"\{[\s\S]*\}", text)
     if match:
         return match.group(0)
@@ -697,12 +771,150 @@ def update_changelog(old_a, new_a, old_b, new_b, results_old, results_new):
     print(f"\n变更日志已更新: {CHANGELOG_FILE}")
 
 
-def write_single_excel(results, output_file, persona_a_ver, persona_b_ver, c_persona_label="", c_persona_desc=""):
-    """单版本测试：写入Excel"""
+def collect_violations(results):
+    """从测试结果中收集所有不合格项的违规摘要，去重后返回文本。"""
+    seen = set()
+    items = []
+    for r in results:
+        if r.get("passed") is False and not r.get("error") and r.get("violation_summary"):
+            summary = r["violation_summary"]
+            if summary not in seen:
+                seen.add(summary)
+                items.append(f"[{r['category']}] {summary}")
+    return "\n".join(items) if items else ""
+
+
+def generate_optimization(client, persona_a_text, violations_text):
+    """调用DeepSeek分析A人设问题并生成优化建议。返回 (analysis_list, revised_persona) 或 (None, None)。"""
+    prompt = f"""你是一位顶尖的AI话术优化专家。以下是当前AI客服使用的完整人设：
+
+---
+{persona_a_text}
+---
+
+在批量压力测试中，以下质检违规被检出（格式：[场景名] [违规类别] 违规原因）：
+
+{violations_text}
+
+请完成以下任务：
+1. 逐条分析：A人设中哪个具体段落/表述导致了该违规，说明根因
+2. 逐条给出优化建议：该段落应该如何修改
+3. 综合所有建议，输出一份修改后的完整A人设（保持原结构和风格）
+
+严格按以下JSON格式输出（不要markdown代码块）：
+
+{{
+  "analysis": [
+    {{
+      "violation": "违规类别（如：对抗性冲突）",
+      "summary": "质检判定的违规原因简述",
+      "root_cause": "A人设中导致此问题的具体段落和原因",
+      "suggestion": "具体优化建议",
+      "revised_text": "建议修改后的文本片段"
+    }}
+  ],
+  "revised_persona": "修改后的完整A人设全文"
+}}"""
+
+    try:
+        raw = call_model(client, MODEL_B, [{"role": "user", "content": prompt}],
+                         "你是一个专业的AI话术优化专家，输出纯JSON。", temperature=0.3)
+    except Exception as e:
+        print(f"  [警告] 优化分析模型调用失败: {e}")
+        return None, None
+
+    try:
+        json_str = extract_json(raw)
+        data = json.loads(json_str)
+        return data.get("analysis", []), data.get("revised_persona", "")
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"  [警告] 优化分析结果解析失败: {e}")
+        return None, None
+
+
+def write_optimization_sheet(ws, analysis_list, revised_persona, persona_a_ver):
+    """写入优化建议工作表。"""
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    persona_fill = PatternFill(start_color="2E75B6", end_color="2E75B6", fill_type="solid")
+    header_font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=10)
+    persona_font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=11)
+    cell_font = Font(name="微软雅黑", size=9)
+    wrap_align = Alignment(wrap_text=True, vertical="top")
+    center_align = Alignment(horizontal="center", vertical="top")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    headers = ["序号", "违规类别", "违规摘要", "A人设根因分析", "优化建议", "建议修改文本"]
+    col_widths = [6, 18, 40, 50, 50, 50]
+
+    # 顶部：推荐新版A人设
+    ws.cell(row=1, column=1, value=f"推荐新版A人设（基于{persona_a_ver}优化）")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+    cell = ws.cell(row=1, column=1)
+    cell.fill = persona_fill
+    cell.font = persona_font
+    cell.alignment = Alignment(horizontal="left", vertical="center")
+    cell.border = thin_border
+    ws.row_dimensions[1].height = 28
+
+    ws.cell(row=2, column=1, value=revised_persona or "")
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(headers))
+    cell = ws.cell(row=2, column=1)
+    cell.font = cell_font
+    cell.alignment = wrap_align
+    cell.border = thin_border
+    ws.row_dimensions[2].height = 300
+
+    # 空行
+    ws.cell(row=3, column=1, value="")
+
+    # 表头
+    header_row = 4
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=header_row, column=col, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center_align
+        cell.border = thin_border
+
+    # 逐条分析
+    for i, item in enumerate(analysis_list or []):
+        row = header_row + 1 + i
+        values = [
+            i + 1,
+            item.get("violation", ""),
+            item.get("summary", ""),
+            item.get("root_cause", ""),
+            item.get("suggestion", ""),
+            item.get("revised_text", ""),
+        ]
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=row, column=col, value=val)
+            cell.font = cell_font
+            cell.alignment = wrap_align
+            cell.border = thin_border
+
+    for col, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.freeze_panes = f"A{header_row + 1}"
+
+
+def write_single_excel(results, output_file, persona_a_ver, persona_b_ver, c_persona_label="", c_persona_desc="",
+                       optimization_data=None):
+    """单版本测试：写入Excel。optimization_data: (analysis_list, revised_persona) 或 None。"""
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = f"测试结果_{persona_a_ver}"
+    label = short_persona_label(c_persona_desc)
+    ws.title = (label or f"测试结果_{persona_a_ver}")[:31]
     write_result_sheet(ws, results, c_persona_label=c_persona_label, c_persona_desc=c_persona_desc)
+
+    if optimization_data:
+        analysis_list, revised_persona = optimization_data
+        ws2 = wb.create_sheet("优化建议")
+        write_optimization_sheet(ws2, analysis_list, revised_persona, persona_a_ver)
 
     wb.save(output_file)
     print(f"\n结果已保存到: {output_file}")
@@ -870,17 +1082,17 @@ def write_result_sheet(ws, results, c_persona_label="", c_persona_desc=""):
     ws.auto_filter.ref = f"A{header_row}:{last_col_letter}{data_start_row + len(results) - 1}"
 
 
-def write_multi_c_excel(results_by_c, output_file, persona_a_ver, persona_b_ver, scenario_order, persona_c_desc_map=None):
-    """多C人设测试：每个C人设独立工作表。
-    persona_c_desc_map: {c_ver: desc} —— 用于在每个工作表顶部展示该 C 人设性格。
-    """
+def write_multi_c_excel(results_by_c, output_file, persona_a_ver, persona_b_ver, scenario_order,
+                        persona_c_desc_map=None, optimization_data=None):
+    """多C人设测试：每个C人设独立工作表。optimization_data: (analysis_list, revised_persona) 或 None。"""
     persona_c_desc_map = persona_c_desc_map or {}
     wb = openpyxl.Workbook()
     default_ws = wb.active
     wb.remove(default_ws)
 
     for c_ver, results in results_by_c.items():
-        ws = wb.create_sheet(f"{c_ver}测试结果"[:31])
+        label = short_persona_label(persona_c_desc_map.get(c_ver, ""))
+        ws = wb.create_sheet((label or c_ver)[:31])
         ordered = sorted(
             results,
             key=lambda r: scenario_order.index(r["category"]) if r["category"] in scenario_order else 999,
@@ -890,6 +1102,11 @@ def write_multi_c_excel(results_by_c, output_file, persona_a_ver, persona_b_ver,
             c_persona_label=c_ver,
             c_persona_desc=persona_c_desc_map.get(c_ver, ""),
         )
+
+    if optimization_data:
+        analysis_list, revised_persona = optimization_data
+        ws_opt = wb.create_sheet("优化建议")
+        write_optimization_sheet(ws_opt, analysis_list, revised_persona, persona_a_ver)
 
     wb.save(output_file)
     print(f"\n多C人设结果已保存到: {output_file}")
@@ -1130,16 +1347,16 @@ def write_regression_excel(results_old, results_new, output_file, old_a_ver, new
 
 
 def write_multi_c_regression_excel(results_by_c, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver,
-                                   scenario_order, persona_c_desc_map=None):
-    """多C人设回归对比：每个C人设一个独立工作表。"""
+                                   scenario_order, persona_c_desc_map=None, optimization_data=None):
+    """多C人设回归对比：每个C人设一个独立工作表。optimization_data: (analysis_list, revised_persona) 或 None。"""
     persona_c_desc_map = persona_c_desc_map or {}
     wb = openpyxl.Workbook()
     default_ws = wb.active
     wb.remove(default_ws)
 
     for c_ver, (results_old, results_new) in results_by_c.items():
-        c_short = c_ver.replace("C_", "")
-        ws = wb.create_sheet(f"{c_ver}对比"[:31])
+        label = short_persona_label(persona_c_desc_map.get(c_ver, ""))
+        ws = wb.create_sheet((label or c_ver)[:31])
         old_ordered = sorted(
             results_old,
             key=lambda r: scenario_order.index(r["category"]) if r["category"] in scenario_order else 999,
@@ -1153,6 +1370,11 @@ def write_multi_c_regression_excel(results_by_c, output_file, old_a_ver, new_a_v
             c_persona_label=c_ver,
             c_persona_desc=persona_c_desc_map.get(c_ver, ""),
         )
+
+    if optimization_data:
+        analysis_list, revised_persona = optimization_data
+        ws_opt = wb.create_sheet("优化建议")
+        write_optimization_sheet(ws_opt, analysis_list, revised_persona, new_a_ver)
 
     wb.save(output_file)
     print(f"\n多C回归对比结果已保存到: {output_file}")
@@ -1201,6 +1423,8 @@ def main():
                         help="只生成A/C对话，不调用B模型质检，用于快速冒烟测试")
     parser.add_argument("--skip-ticket", action="store_true",
                         help="跳过D模型工单生成；与--skip-audit互相独立")
+    parser.add_argument("--analyze-failures", action="store_true",
+                        help="对不合格场景调用模型分析A人设根因并生成优化建议")
 
     args = parser.parse_args()
 
@@ -1367,6 +1591,23 @@ def main():
 
         total_elapsed = time.time() - total_start
 
+        # 优化分析（基于新版A人设的新版结果）
+        opt_data = None
+        if args.analyze_failures:
+            print(f"\n  调用优化分析模型...")
+            all_failed_new = []
+            for _, results_new in results_by_c.values():
+                all_failed_new.extend([r for r in results_new if r.get("passed") is False and not r.get("error")])
+            violations_text = collect_violations(all_failed_new)
+            if violations_text:
+                opt_data = generate_optimization(client, persona_a_new, violations_text)
+                if opt_data[0]:
+                    print(f"  优化建议已生成 ({len(opt_data[0])} 条)")
+                else:
+                    print(f"  优化分析未产出结果")
+            else:
+                print(f"  无不合格项，跳过优化分析")
+
         # 写 Excel
         print(f"\n[3/3] 写入多C回归对比Excel...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1379,7 +1620,7 @@ def main():
         )
         cat_order = list(scenarios)
         write_multi_c_regression_excel(results_by_c, output_file, old_a_ver, new_a_ver, old_b_ver, new_b_ver,
-                                       cat_order, persona_c_desc_map)
+                                       cat_order, persona_c_desc_map, opt_data)
         copy_to_latest(output_file, latest_file)
 
         # 更新变更日志（为每个 C 人设写入一条）
@@ -1439,6 +1680,23 @@ def main():
             for results in results_by_c.values():
                 results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
 
+            # 优化分析
+            opt_data = None
+            if args.analyze_failures:
+                print(f"\n  调用优化分析模型...")
+                all_failed = []
+                for results in results_by_c.values():
+                    all_failed.extend([r for r in results if r.get("passed") is False and not r.get("error")])
+                violations_text = collect_violations(all_failed)
+                if violations_text:
+                    opt_data = generate_optimization(client, persona_a, violations_text)
+                    if opt_data[0]:
+                        print(f"  优化建议已生成 ({len(opt_data[0])} 条)")
+                    else:
+                        print(f"  优化分析未产出结果")
+                else:
+                    print(f"  无不合格项，跳过优化分析")
+
             print(f"\n[3/3] 写入多C人设Excel...")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             latest_name = f"AI外呼多C测试结果_{a_ver}_{b_ver}_{timestamp}.xlsx"
@@ -1447,7 +1705,7 @@ def main():
                 f"{a_ver}_{b_ver}_{'-'.join(c_versions)}",
                 latest_name,
             )
-            write_multi_c_excel(results_by_c, output_file, a_ver, b_ver, cat_order, persona_c_desc_map)
+            write_multi_c_excel(results_by_c, output_file, a_ver, b_ver, cat_order, persona_c_desc_map, opt_data)
             copy_to_latest(output_file, latest_file)
 
             print("\n" + "=" * 60)
@@ -1469,6 +1727,21 @@ def main():
                                     persona_d=persona_d, skip_ticket=args.skip_ticket)
         results.sort(key=lambda r: cat_order.index(r["category"]) if r["category"] in cat_order else 999)
 
+        # 优化分析
+        opt_data = None
+        if args.analyze_failures:
+            print(f"\n  调用优化分析模型...")
+            failed = [r for r in results if r.get("passed") is False and not r.get("error")]
+            violations_text = collect_violations(failed)
+            if violations_text:
+                opt_data = generate_optimization(client, persona_a, violations_text)
+                if opt_data[0]:
+                    print(f"  优化建议已生成 ({len(opt_data[0])} 条)")
+                else:
+                    print(f"  优化分析未产出结果")
+            else:
+                print(f"  无不合格项，跳过优化分析")
+
         print(f"\n[3/3] 写入Excel...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         c_ver = next(iter(persona_c_map.keys()))
@@ -1480,7 +1753,8 @@ def main():
         )
         write_single_excel(results, output_file, a_ver, b_ver,
                            c_persona_label=c_ver,
-                           c_persona_desc=persona_c_desc_map.get(c_ver, ""))
+                           c_persona_desc=persona_c_desc_map.get(c_ver, ""),
+                           optimization_data=opt_data)
         copy_to_latest(output_file, latest_file)
 
         total_scenarios = len(results)

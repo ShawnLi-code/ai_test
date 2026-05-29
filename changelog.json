@@ -239,6 +239,30 @@
         "B": "B_v1"
       },
       "change_summary": "合格率: 24/24 → 24/24"
+    },
+    {
+      "timestamp": "2026-05-25T14:36:56.634307",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 3/3 → 3/3"
+    },
+    {
+      "timestamp": "2026-05-25T14:36:56.645477",
+      "old_persona": {
+        "A": "A_v1",
+        "B": "B_v1"
+      },
+      "new_persona": {
+        "A": "A_v4",
+        "B": "B_v1"
+      },
+      "change_summary": "合格率: 1/3 → 3/3"
     }
   ]
 }
