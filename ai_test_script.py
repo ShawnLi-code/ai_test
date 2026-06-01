@@ -110,6 +110,13 @@ DEFAULT_SCENARIOS = [
     "比较竞品",
     "异常输入",
     "情感诉求",
+    # 模糊边界场景：测试工单在"有意向升级"与"明确拒绝"之间的判断精度
+    "礼貌性敷衍",
+    "替他人了解",
+    "条件反射追问",
+    "社交压力含糊",
+    "逐步冷却",
+    "条件式意向",
 ]
 API_SEMAPHORE = threading.BoundedSemaphore(max(1, API_CONCURRENCY))
 
