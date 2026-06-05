@@ -80,6 +80,20 @@ def config_int(name, env_name, default):
     return int(config_value(name, env_name, default))
 
 
+def build_client(api_key=None, base_url=None):
+    """Create an OpenAI-compatible client for direct script usage and Promptfoo."""
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise ImportError("Missing dependency: openai. Run `pip install -r requirements.txt`.") from exc
+
+    resolved_api_key = api_key or API_KEY
+    resolved_base_url = base_url or BASE_URL
+    if not resolved_api_key:
+        raise ValueError("API key is empty. Set `api_key` in config.local.json or ARK_API_KEY.")
+    return OpenAI(base_url=resolved_base_url, api_key=resolved_api_key)
+
+
 API_KEY = config_value("api_key", "ARK_API_KEY", "")
 BASE_URL = config_value("base_url", "ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
 MODEL_A = config_value("model_a", "MODEL_A", "ep-20250819111944-q8h4b")   # A模型-豆包(AI客服)
@@ -650,6 +664,37 @@ def run_one_scenario(client, category, persona_a, persona_b, persona_c,
         result["violation_count"] = -1
         result["violation_summary"] = "质检结果JSON解析失败"
 
+    return result
+
+
+def run_one_scenario_by_version(category, persona_a_ver, persona_b_ver, persona_c_ver,
+                                persona_d_ver=None, skip_audit=False, skip_ticket=False):
+    """Resolve personas by version and execute a single scenario end-to-end."""
+    client = build_client()
+    persona_a = load_persona(persona_a_ver)
+    persona_b = load_persona(persona_b_ver)
+    persona_c = load_persona(persona_c_ver)
+    persona_d = load_persona(persona_d_ver) if persona_d_ver else None
+
+    result = run_one_scenario(
+        client=client,
+        category=category,
+        persona_a=persona_a,
+        persona_b=persona_b,
+        persona_c=persona_c,
+        persona_d=persona_d,
+        skip_audit=skip_audit,
+        skip_ticket=skip_ticket,
+    )
+    result["meta"] = {
+        "persona_a_ver": persona_a_ver,
+        "persona_b_ver": persona_b_ver,
+        "persona_c_ver": persona_c_ver,
+        "persona_d_ver": persona_d_ver or "",
+        "skip_audit": skip_audit,
+        "skip_ticket": skip_ticket,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
     return result
 
 

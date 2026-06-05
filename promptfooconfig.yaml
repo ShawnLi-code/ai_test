@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+
+description: AItest persona regression with Promptfoo
+
+prompts:
+  - "{{category}}"
+
+providers:
+  - id: file://promptfoo_provider.py
+    label: aitest-python-provider
+
+tests:
+  - path: file://promptfoo_tests.py:create_tests
+    config:
+      persona_a_ver: A_v1
+      persona_b_ver: B_v1
+      persona_c_versions:
+        - C_v1
+      persona_d_ver: D_v1
+      limit: 3
+      sample_size: 0
+      sample_seed: 42
+      skip_audit: false
+      skip_ticket: false
+
+defaultTest:
+  assert:
+    - type: python
+      value: file://promptfoo_assert.py:get_assert
