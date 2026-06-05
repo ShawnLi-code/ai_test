@@ -39,18 +39,27 @@ RUNS_DIR = os.path.join(RESULTS_DIR, "runs")
 LATEST_DIR = os.path.join(RESULTS_DIR, "latest")
 CHANGELOG_FILE = os.path.join(SCRIPT_DIR, "changelog.json")
 DEFAULT_CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.local.json")
+EXAMPLE_CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.example.json")
+
+
+def _load_json(path):
+    """加载JSON文件；文件不存在时返回空字典。"""
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def load_config(config_path):
-    """加载JSON配置文件；文件不存在时返回空配置。"""
+    """加载JSON配置文件：config.local.json 覆盖 config.example.json。"""
     if not config_path:
-        return {}
+        config_path = DEFAULT_CONFIG_FILE
     if not os.path.isabs(config_path):
         config_path = os.path.join(SCRIPT_DIR, config_path)
-    if not os.path.exists(config_path):
-        return {}
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    config = _load_json(EXAMPLE_CONFIG_FILE)
+    if os.path.normpath(config_path) != os.path.normpath(EXAMPLE_CONFIG_FILE):
+        config.update(_load_json(config_path))
+    return config
 
 
 CONFIG = load_config(DEFAULT_CONFIG_FILE)
@@ -73,10 +82,10 @@ def config_int(name, env_name, default):
 
 API_KEY = config_value("api_key", "ARK_API_KEY", "")
 BASE_URL = config_value("base_url", "ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
-MODEL_A = config_value("model_a", "MODEL_A", "doubao-1-5-pro-32k-250115")   # A模型-豆包(AI客服)
-MODEL_B = config_value("model_b", "MODEL_B", "deepseek-v3-2-251201")         # B模型-DeepSeek(质检)
-MODEL_C = config_value("model_c", "MODEL_C", "doubao-1-5-pro-32k-250115")   # C模型-豆包(模拟用户)
-MODEL_D = config_value("model_d", "MODEL_D", "doubao-1-5-pro-32k-250115")   # D模型-豆包(工单生成，默认与A同模型)
+MODEL_A = config_value("model_a", "MODEL_A", "ep-20250819111944-q8h4b")   # A模型-豆包(AI客服)
+MODEL_B = config_value("model_b", "MODEL_B", "ep-m-20260522113719-2pbxz")   # B模型-DeepSeek(质检)
+MODEL_C = config_value("model_c", "MODEL_C", "ep-m-20250728164052-p54sp")   # C模型-豆包(模拟用户)
+MODEL_D = config_value("model_d", "MODEL_D", "ep-m-20250728164052-p54sp")   # D模型-豆包(工单生成，默认与A同模型)
 CONCURRENCY = config_int("concurrency", "TEST_CONCURRENCY", 10)
 PERSONA_CONCURRENCY = config_int("persona_concurrency", "PERSONA_CONCURRENCY", 2)
 API_CONCURRENCY = config_int("api_concurrency", "API_CONCURRENCY", 30)
